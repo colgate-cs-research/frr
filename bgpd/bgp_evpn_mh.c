@@ -1589,7 +1589,7 @@ static void bgp_evpn_es_local_info_set(struct bgp *bgp, struct bgp_evpn_es *es)
 	bf_assign_index(bm->rd_idspace, es->rd_id);
 	es->prd.family = AF_UNSPEC;
 	es->prd.prefixlen = 64;
-	snprintf(buf, sizeof buf, "%s:%hu", inet_ntoa(bgp->router_id),
+	snprintf(buf, sizeof(buf), "%s:%hu", inet_ntoa(bgp->router_id),
 		 es->rd_id);
 	(void)str2prefix_rd(buf, &es->prd);
 }
@@ -1828,12 +1828,12 @@ static char *bgp_evpn_es_vteps_str(char *vtep_str, struct bgp_evpn_es *es,
 	for (ALL_LIST_ELEMENTS_RO(es->es_vtep_list, node, es_vtep)) {
 		vtep_flag_str[0] = '\0';
 		if (es_vtep->flags & BGP_EVPNES_VTEP_ESR)
-			strlcat(vtep_flag_str, "E", sizeof vtep_flag_str);
+			strlcat(vtep_flag_str, "E", sizeof(vtep_flag_str));
 		if (es_vtep->flags & BGP_EVPNES_VTEP_ACTIVE)
-			strlcat(vtep_flag_str, "A", sizeof vtep_flag_str);
+			strlcat(vtep_flag_str, "A", sizeof(vtep_flag_str));
 
 		if (!strlen(vtep_flag_str))
-			strlcat(vtep_flag_str, "-", sizeof vtep_flag_str);
+			strlcat(vtep_flag_str, "-", sizeof(vtep_flag_str));
 		if (first)
 			first = false;
 		else
@@ -1888,12 +1888,12 @@ static void bgp_evpn_es_vteps_show_detail(struct vty *vty,
 	for (ALL_LIST_ELEMENTS_RO(es->es_vtep_list, node, es_vtep)) {
 		vtep_flag_str[0] = '\0';
 		if (es_vtep->flags & BGP_EVPNES_VTEP_ESR)
-			strlcat(vtep_flag_str, "E", sizeof vtep_flag_str);
+			strlcat(vtep_flag_str, "E", sizeof(vtep_flag_str));
 		if (es_vtep->flags & BGP_EVPNES_VTEP_ACTIVE)
-			strlcat(vtep_flag_str, "A", sizeof vtep_flag_str);
+			strlcat(vtep_flag_str, "A", sizeof(vtep_flag_str));
 
 		if (!strlen(vtep_flag_str))
-			strlcat(vtep_flag_str, "-", sizeof vtep_flag_str);
+			strlcat(vtep_flag_str, "-", sizeof(vtep_flag_str));
 
 		vty_out(vty, "  %s flags: %s",
 				inet_ntoa(es_vtep->vtep_ip), vtep_flag_str);
@@ -1948,18 +1948,18 @@ static void bgp_evpn_es_show_entry(struct vty *vty,
 
 		type_str[0] = '\0';
 		if (es->flags & BGP_EVPNES_LOCAL)
-			strlcat(type_str, "L", sizeof type_str);
+			strlcat(type_str, "L", sizeof(type_str));
 		if (es->flags & BGP_EVPNES_REMOTE)
-			strlcat(type_str, "R", sizeof type_str);
+			strlcat(type_str, "R", sizeof(type_str));
 		if (es->inconsistencies)
-			strlcat(type_str, "I", sizeof type_str);
+			strlcat(type_str, "I", sizeof(type_str));
 
-		bgp_evpn_es_vteps_str(vtep_str, es, sizeof vtep_str);
+		bgp_evpn_es_vteps_str(vtep_str, es, sizeof(vtep_str));
 
 		if (es->flags & BGP_EVPNES_LOCAL)
 			prefix_rd2str(&es->prd, buf1, sizeof(buf1));
 		else
-			strlcpy(buf1, "-", sizeof buf1);
+			strlcpy(buf1, "-", sizeof(buf1));
 
 		vty_out(vty, "%-30s %-5s %-21s %-8d %s\n",
 				es->esi_str, type_str, buf1,
@@ -2021,14 +2021,14 @@ static void bgp_evpn_es_show_entry_detail(struct vty *vty,
 
 		type_str[0] = '\0';
 		if (es->flags & BGP_EVPNES_LOCAL)
-			strlcat(type_str, "L", sizeof type_str);
+			strlcat(type_str, "L", sizeof(type_str));
 		if (es->flags & BGP_EVPNES_REMOTE)
-			strlcat(type_str, "R", sizeof type_str);
+			strlcat(type_str, "R", sizeof(type_str));
 
 		if (es->flags & BGP_EVPNES_LOCAL)
 			prefix_rd2str(&es->prd, buf1, sizeof(buf1));
 		else
-			strlcpy(buf1, "-", sizeof buf1);
+			strlcpy(buf1, "-", sizeof(buf1));
 
 		vty_out(vty, "ESI: %s\n", es->esi_str);
 		vty_out(vty, " Type: %s\n", type_str);
@@ -2051,9 +2051,9 @@ static void bgp_evpn_es_show_entry_detail(struct vty *vty,
 			incons_str[0] = '\0';
 			if (es->inconsistencies & BGP_EVPNES_INCONS_VTEP_LIST)
 				strlcat(incons_str, "vni-vtep-mismatch",
-					sizeof incons_str);
+					sizeof(incons_str));
 		} else {
-			strlcpy(incons_str, "-", sizeof incons_str);
+			strlcpy(incons_str, "-", sizeof(incons_str));
 		}
 		vty_out(vty, " Inconsistencies: %s\n",
 				incons_str);
@@ -2571,7 +2571,7 @@ static void bgp_evpn_es_vrf_show_entry(struct vty *vty,
 
 		flags_str[0] = '\0';
 		if (es_vrf->flags & BGP_EVPNES_VRF_NHG_ACTIVE)
-			strlcat(flags_str, "A", sizeof flags_str);
+			strlcat(flags_str, "A", sizeof(flags_str));
 
 		vty_out(vty,
 			"%-30s %-15s %-5s %-8u %-8u %u\n",
@@ -3231,12 +3231,12 @@ static char *bgp_evpn_es_evi_vteps_str(char *vtep_str,
 	for (ALL_LIST_ELEMENTS_RO(es_evi->es_evi_vtep_list, node, evi_vtep)) {
 		vtep_flag_str[0] = '\0';
 		if (evi_vtep->flags & BGP_EVPN_EVI_VTEP_EAD_PER_ES)
-			strlcat(vtep_flag_str, "E", sizeof vtep_flag_str);
+			strlcat(vtep_flag_str, "E", sizeof(vtep_flag_str));
 		if (evi_vtep->flags & BGP_EVPN_EVI_VTEP_EAD_PER_EVI)
-			strlcat(vtep_flag_str, "V", sizeof vtep_flag_str);
+			strlcat(vtep_flag_str, "V", sizeof(vtep_flag_str));
 
-		if (!strnlen(vtep_flag_str, sizeof vtep_flag_str))
-			strlcpy(vtep_flag_str, "-", sizeof vtep_flag_str);
+		if (!strnlen(vtep_flag_str, sizeof(vtep_flag_str)))
+			strlcpy(vtep_flag_str, "-", sizeof(vtep_flag_str));
 		if (first)
 			first = false;
 		else
@@ -3314,13 +3314,13 @@ static void bgp_evpn_es_evi_show_entry(struct vty *vty,
 
 		type_str[0] = '\0';
 		if (es_evi->flags & BGP_EVPNES_EVI_LOCAL)
-			strlcat(type_str, "L", sizeof type_str);
+			strlcat(type_str, "L", sizeof(type_str));
 		if (es_evi->flags & BGP_EVPNES_EVI_REMOTE)
-			strlcat(type_str, "R", sizeof type_str);
+			strlcat(type_str, "R", sizeof(type_str));
 		if (es_evi->flags & BGP_EVPNES_EVI_INCONS_VTEP_LIST)
-			strlcat(type_str, "I", sizeof type_str);
+			strlcat(type_str, "I", sizeof(type_str));
 
-		bgp_evpn_es_evi_vteps_str(vtep_str, es_evi, sizeof vtep_str);
+		bgp_evpn_es_evi_vteps_str(vtep_str, es_evi, sizeof(vtep_str));
 
 		vty_out(vty, "%-8d %-30s %-5s %s\n",
 				es_evi->vpn->vni, es_evi->es->esi_str,
@@ -3347,13 +3347,13 @@ static void bgp_evpn_es_evi_show_entry_detail(struct vty *vty,
 
 		type_str[0] = '\0';
 		if (es_evi->flags & BGP_EVPNES_EVI_LOCAL)
-			strlcat(type_str, "L", sizeof type_str);
+			strlcat(type_str, "L", sizeof(type_str));
 		if (es_evi->flags & BGP_EVPNES_EVI_REMOTE)
-			strlcat(type_str, "R", sizeof type_str);
+			strlcat(type_str, "R", sizeof(type_str));
 
-		bgp_evpn_es_evi_vteps_str(vtep_str, es_evi, sizeof vtep_str);
+		bgp_evpn_es_evi_vteps_str(vtep_str, es_evi, sizeof(vtep_str));
 		if (!strlen(vtep_str))
-			strlcpy(vtep_str, "-", sizeof type_str);
+			strlcpy(vtep_str, "-", sizeof(type_str));
 
 		vty_out(vty, "VNI: %d ESI: %s\n",
 				es_evi->vpn->vni, es_evi->es->esi_str);

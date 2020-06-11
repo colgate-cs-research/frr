@@ -285,7 +285,7 @@ static void zebra_evpn_es_evi_show_entry(struct vty *vty,
 	} else {
 		type_str[0] = '\0';
 		if (es_evi->flags & ZEBRA_EVPNES_EVI_LOCAL)
-			strlcat(type_str, "L", sizeof type_str);
+			strlcat(type_str, "L", sizeof(type_str));
 
 		vty_out(vty, "%-8d %-30s %-4s\n",
 				es_evi->zevpn->vni, es_evi->es->esi_str,
@@ -323,7 +323,7 @@ static void zebra_evpn_es_evi_show_entry_detail(struct vty *vty,
 	} else {
 		type_str[0] = '\0';
 		if (es_evi->flags & ZEBRA_EVPNES_EVI_LOCAL)
-			strlcat(type_str, "L", sizeof type_str);
+			strlcat(type_str, "L", sizeof(type_str));
 
 		vty_out(vty, "VNI %d ESI: %s\n",
 				es_evi->zevpn->vni, es_evi->es->esi_str);
@@ -1143,9 +1143,9 @@ static void zebra_evpn_nhg_update(struct zebra_evpn_es *es)
 
 			nh_str[0] = '\0';
 			for (i = 0; i < nh_cnt; ++i) {
-				snprintf(nh_buf, sizeof nh_buf, "%u ",
+				snprintf(nh_buf, sizeof(nh_buf), "%u ",
 					 nh_ids[i].id);
-				strlcat(nh_str, nh_buf, sizeof nh_str);
+				strlcat(nh_str, nh_buf, sizeof(nh_str));
 			}
 			zlog_debug("es %s nhg %u add %s",
 					es->esi_str, es->nhg_id, nh_str);
@@ -2415,13 +2415,13 @@ void zebra_evpn_if_es_print(struct vty *vty, struct zebra_if *zif)
 	bool vty_print = false;
 
 	mh_buf[0] = '\0';
-	snprintf(mh_buf + strnlen(mh_buf, sizeof mh_buf),
-		 sizeof(mh_buf) - strnlen(mh_buf, sizeof mh_buf), "  EVPN-MH:");
+	snprintf(mh_buf + strnlen(mh_buf, sizeof(mh_buf)),
+		 sizeof(mh_buf) - strnlen(mh_buf, sizeof(mh_buf)), "  EVPN-MH:");
 	if (zif->es_info.lid || !is_zero_mac(&zif->es_info.sysmac)) {
 		vty_print = true;
 		snprintf(
-			mh_buf + strnlen(mh_buf, sizeof mh_buf),
-			sizeof(mh_buf) - strnlen(mh_buf, sizeof mh_buf),
+			mh_buf + strnlen(mh_buf, sizeof(mh_buf)),
+			sizeof(mh_buf) - strnlen(mh_buf, sizeof(mh_buf)),
 			" ES id %u ES sysmac %s", zif->es_info.lid,
 			prefix_mac2str(&zif->es_info.sysmac, buf, sizeof(buf)));
 	}
@@ -2429,14 +2429,14 @@ void zebra_evpn_if_es_print(struct vty *vty, struct zebra_if *zif)
 	if (zif->flags & ZIF_FLAG_EVPN_MH_UPLINK) {
 		vty_print = true;
 		if (zif->flags & ZIF_FLAG_EVPN_MH_UPLINK_OPER_UP)
-			snprintf(mh_buf + strnlen(mh_buf, sizeof mh_buf),
+			snprintf(mh_buf + strnlen(mh_buf, sizeof(mh_buf)),
 				 sizeof(mh_buf)
-					 - strnlen(mh_buf, sizeof mh_buf),
+					 - strnlen(mh_buf, sizeof(mh_buf)),
 				 " uplink-up");
 		else
-			snprintf(mh_buf + strnlen(mh_buf, sizeof mh_buf),
+			snprintf(mh_buf + strnlen(mh_buf, sizeof(mh_buf)),
 				 sizeof(mh_buf)
-					 - strnlen(mh_buf, sizeof mh_buf),
+					 - strnlen(mh_buf, sizeof(mh_buf)),
 				 " uplink-down");
 	}
 
@@ -2624,13 +2624,13 @@ static void zebra_evpn_es_show_entry(struct vty *vty,
 	} else {
 		type_str[0] = '\0';
 		if (es->flags & ZEBRA_EVPNES_LOCAL)
-			strlcat(type_str, "L", sizeof type_str);
+			strlcat(type_str, "L", sizeof(type_str));
 		if (es->flags & ZEBRA_EVPNES_REMOTE)
-			strlcat(type_str, "R", sizeof type_str);
+			strlcat(type_str, "R", sizeof(type_str));
 		if (es->flags & ZEBRA_EVPNES_NON_DF)
-			strlcat(type_str, "N", sizeof type_str);
+			strlcat(type_str, "N", sizeof(type_str));
 
-		zebra_evpn_es_vtep_str(vtep_str, es, sizeof vtep_str);
+		zebra_evpn_es_vtep_str(vtep_str, es, sizeof(vtep_str));
 
 		vty_out(vty, "%-30s %-4s %-21s %s\n",
 				es->esi_str, type_str,
@@ -2692,11 +2692,11 @@ static void zebra_evpn_es_show_entry_detail(struct vty *vty,
 	} else {
 		type_str[0] = '\0';
 		if (es->flags & ZEBRA_EVPNES_LOCAL)
-			strlcat(type_str, "Local", sizeof type_str);
+			strlcat(type_str, "Local", sizeof(type_str));
 		if (es->flags & ZEBRA_EVPNES_REMOTE) {
-			if (strnlen(type_str, sizeof type_str))
-				strlcat(type_str, ",", sizeof type_str);
-			strlcat(type_str, "Remote", sizeof type_str);
+			if (strnlen(type_str, sizeof(type_str)))
+				strlcat(type_str, ",", sizeof(type_str));
+			strlcat(type_str, "Remote", sizeof(type_str));
 		}
 
 		vty_out(vty, "ESI: %s\n", es->esi_str);
