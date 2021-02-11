@@ -1,0 +1,1 @@
+To build docker image, use the Dockerfile at docker/alpine/Dockerfile. 
