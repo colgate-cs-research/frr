@@ -1,5 +1,5 @@
 # This stage builds a dist tarball from the source
-FROM alpine:edge as source-builder
+FROM alpine:3.12 as source-builder
 
 RUN mkdir -p /src/alpine
 COPY alpine/APKBUILD.in /src/alpine
@@ -10,18 +10,19 @@ RUN source /src/alpine/APKBUILD.in \
 		--update-cache \
 		$makedepends \
 		gzip
-
-COPY . /src
+ADD . /src
 ARG PKGVER
 RUN cd /src \
 	&& ./bootstrap.sh \
 	&& ./configure \
+		--disable-dependency-tracking \
 		--enable-numeric-version \
+		--disable-doc \
 		--with-pkg-extra-version="_git$PKGVER" \
 	&& make dist
 
 # This stage builds an apk from the dist tarball
-FROM alpine:edge as alpine-builder
+FROM alpine:3.12 as alpine-builder
 # Don't use nocache here so that abuild can use the cache
 RUN echo 'http://dl-cdn.alpinelinux.org/alpine/edge/testing' >> /etc/apk/repositories \
 	&& apk add \
@@ -36,13 +37,20 @@ RUN echo 'http://dl-cdn.alpinelinux.org/alpine/edge/testing' >> /etc/apk/reposit
 COPY --from=source-builder /src/frr-*.tar.gz /src/alpine/* /dist/
 RUN adduser -D -G abuild builder && chown -R builder /dist /pkgs
 USER builder
+
 RUN cd /dist \
-	&& abuild-keygen -a -n \
-	&& abuild checksum \
+	&& abuild-keygen -a -n
+	
+RUN cd /dist \
+	&& abuild checksum
+	
+RUN cd /dist && cat APKBUILD && cat APKBUILD.in
+	
+RUN cd /dist \
 	&& abuild -r -P /pkgs/apk
 
 # This stage installs frr from the apk
-FROM alpine:edge
+FROM alpine:3.12
 RUN mkdir -p /pkgs/apk
 COPY --from=alpine-builder /pkgs/apk/ /pkgs/apk/
 RUN echo 'http://dl-cdn.alpinelinux.org/alpine/edge/testing' >> /etc/apk/repositories \
