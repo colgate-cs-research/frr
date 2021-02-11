@@ -22,40 +22,6 @@
 #include "libfrr.h"
 #include "zebra_nb.h"
 
-const char *zebra_afi_safi_value2identity(afi_t afi, safi_t safi)
-{
-	if (afi == AFI_IP && safi == SAFI_UNICAST)
-		return "ipv4-unicast";
-	if (afi == AFI_IP6 && safi == SAFI_UNICAST)
-		return "ipv6-unicast";
-	if (afi == AFI_IP && safi == SAFI_MULTICAST)
-		return "ipv4-multicast";
-	if (afi == AFI_IP6 && safi == SAFI_MULTICAST)
-		return "ipv6-multicast";
-
-	return " ";
-}
-
-void zebra_afi_safi_identity2value(const char *key, afi_t *afi, safi_t *safi)
-{
-	if (strmatch(key, "frr-zebra:ipv4-unicast")) {
-		*afi = AFI_IP;
-		*safi = SAFI_UNICAST;
-	} else if (strmatch(key, "frr-zebra:ipv6-unicast")) {
-		*afi = AFI_IP6;
-		*safi = SAFI_UNICAST;
-	} else if (strmatch(key, "frr-zebra:ipv4-multicast")) {
-		*afi = AFI_IP;
-		*safi = SAFI_MULTICAST;
-	} else if (strmatch(key, "frr-zebra:ipv6-multicast")) {
-		*afi = AFI_IP6;
-		*safi = SAFI_MULTICAST;
-	} else {
-		*afi = AFI_UNSPEC;
-		*safi = SAFI_UNSPEC;
-	}
-}
-
 /* clang-format off */
 const struct frr_yang_module_info frr_zebra_info = {
 	.name = "frr-zebra",
@@ -123,27 +89,6 @@ const struct frr_yang_module_info frr_zebra_info = {
 			.xpath = "/frr-zebra:zebra/dplane-queue-limit",
 			.cbs = {
 				.modify = zebra_dplane_queue_limit_modify,
-			}
-		},
-		{
-			.xpath = "/frr-zebra:zebra/vrf-vni-mapping",
-			.cbs = {
-				.create = zebra_vrf_vni_mapping_create,
-				.destroy = zebra_vrf_vni_mapping_destroy,
-			}
-		},
-		{
-			.xpath = "/frr-zebra:zebra/vrf-vni-mapping/vni-id",
-			.cbs = {
-				.modify = zebra_vrf_vni_mapping_vni_id_modify,
-				.destroy = zebra_vrf_vni_mapping_vni_id_destroy,
-			}
-		},
-		{
-			.xpath = "/frr-zebra:zebra/vrf-vni-mapping/prefix-only",
-			.cbs = {
-				.create = zebra_vrf_vni_mapping_prefix_only_create,
-				.destroy = zebra_vrf_vni_mapping_prefix_only_destroy,
 			}
 		},
 		{
@@ -608,6 +553,12 @@ const struct frr_yang_module_info frr_zebra_info = {
 			}
 		},
 		{
+			.xpath = "/frr-vrf:lib/vrf/frr-zebra:zebra/ribs/rib/route/route-entry/nexthop-group/nexthop/srte-color",
+			.cbs = {
+				.get_elem = lib_vrf_zebra_ribs_rib_route_route_entry_nexthop_group_nexthop_color_get_elem,
+			}
+		},
+		{
 			.xpath = "/frr-vrf:lib/vrf/frr-zebra:zebra/ribs/rib/route/route-entry/nexthop-group/nexthop/mpls-label-stack/entry",
 			.cbs = {
 				.get_next = lib_vrf_zebra_ribs_rib_route_route_entry_nexthop_group_nexthop_mpls_label_stack_entry_get_next,
@@ -667,6 +618,19 @@ const struct frr_yang_module_info frr_zebra_info = {
 			.xpath = "/frr-vrf:lib/vrf/frr-zebra:zebra/ribs/rib/route/route-entry/nexthop-group/nexthop/weight",
 			.cbs = {
 				.get_elem = lib_vrf_zebra_ribs_rib_route_route_entry_nexthop_group_nexthop_weight_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-vrf:lib/vrf/frr-zebra:zebra/l3vni-id",
+			.cbs = {
+				.modify = lib_vrf_zebra_l3vni_id_modify,
+				.destroy = lib_vrf_zebra_l3vni_id_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-vrf:lib/vrf/frr-zebra:zebra/prefix-only",
+			.cbs = {
+				.modify = lib_vrf_zebra_prefix_only_modify,
 			}
 		},
 		{

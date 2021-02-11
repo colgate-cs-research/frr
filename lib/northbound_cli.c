@@ -53,6 +53,114 @@ static void vty_show_nb_errors(struct vty *vty, int error, const char *errmsg)
 		vty_out(vty, "Error description: %s\n", errmsg);
 }
 
+static int nb_cli_classic_commit(struct vty *vty)
+{
+	struct nb_context context = {};
+	char errmsg[BUFSIZ] = {0};
+	int ret;
+
+	context.client = NB_CLIENT_CLI;
+	context.user = vty;
+	ret = nb_candidate_commit(&context, vty->candidate_config, true, NULL,
+				  NULL, errmsg, sizeof(errmsg));
+	switch (ret) {
+	case NB_OK:
+		/* Successful commit. Print warnings (if any). */
+		if (strlen(errmsg) > 0)
+			vty_out(vty, "%s\n", errmsg);
+		break;
+	case NB_ERR_NO_CHANGES:
+		break;
+	default:
+		vty_out(vty, "%% Configuration failed.\n\n");
+		vty_show_nb_errors(vty, ret, errmsg);
+		if (vty->t_pending_commit)
+			vty_out(vty,
+				"The following commands were dynamically grouped into the same transaction and rejected:\n%s",
+				vty->pending_cmds_buf);
+
+		/* Regenerate candidate for consistency. */
+		nb_config_replace(vty->candidate_config, running_config, true);
+		return CMD_WARNING_CONFIG_FAILED;
+	}
+
+	return CMD_SUCCESS;
+}
+
+static void nb_cli_pending_commit_clear(struct vty *vty)
+{
+	THREAD_OFF(vty->t_pending_commit);
+	vty->backoff_cmd_count = 0;
+	XFREE(MTYPE_TMP, vty->pending_cmds_buf);
+	vty->pending_cmds_buflen = 0;
+	vty->pending_cmds_bufpos = 0;
+}
+
+static int nb_cli_pending_commit_cb(struct thread *thread)
+{
+	struct vty *vty = THREAD_ARG(thread);
+
+	(void)nb_cli_classic_commit(vty);
+	nb_cli_pending_commit_clear(vty);
+
+	return 0;
+}
+
+void nb_cli_pending_commit_check(struct vty *vty)
+{
+	if (vty->t_pending_commit) {
+		(void)nb_cli_classic_commit(vty);
+		nb_cli_pending_commit_clear(vty);
+	}
+}
+
+static bool nb_cli_backoff_start(struct vty *vty)
+{
+	struct timeval now, delta;
+
+	/*
+	 * Start the configuration backoff timer only if 100 YANG-modeled
+	 * commands or more were entered within the last second.
+	 */
+	monotime(&now);
+	if (monotime_since(&vty->backoff_start, &delta) >= 1000000) {
+		vty->backoff_start = now;
+		vty->backoff_cmd_count = 1;
+		return false;
+	}
+	if (++vty->backoff_cmd_count < 100)
+		return false;
+
+	return true;
+}
+
+static int nb_cli_schedule_command(struct vty *vty)
+{
+	/* Append command to dynamically sized buffer of scheduled commands. */
+	if (!vty->pending_cmds_buf) {
+		vty->pending_cmds_buflen = 4096;
+		vty->pending_cmds_buf =
+			XCALLOC(MTYPE_TMP, vty->pending_cmds_buflen);
+	}
+	if ((strlen(vty->buf) + 3)
+	    > (vty->pending_cmds_buflen - vty->pending_cmds_bufpos)) {
+		vty->pending_cmds_buflen *= 2;
+		vty->pending_cmds_buf =
+			XREALLOC(MTYPE_TMP, vty->pending_cmds_buf,
+				 vty->pending_cmds_buflen);
+	}
+	strlcat(vty->pending_cmds_buf, "- ", vty->pending_cmds_buflen);
+	vty->pending_cmds_bufpos = strlcat(vty->pending_cmds_buf, vty->buf,
+					   vty->pending_cmds_buflen);
+
+	/* Schedule the commit operation. */
+	THREAD_OFF(vty->t_pending_commit);
+	thread_add_timer_msec(master, nb_cli_pending_commit_cb, vty, 100,
+			      &vty->t_pending_commit);
+
+	return CMD_SUCCESS;
+}
+
 void nb_cli_enqueue_change(struct vty *vty, const char *xpath,
 			   enum nb_operation operation, const char *value)
 {
@@ -76,7 +184,6 @@ int nb_cli_apply_changes(struct vty *vty, const char *xpath_base_fmt, ...)
 {
 	char xpath_base[XPATH_MAXLEN] = {};
 	bool error = false;
-	int ret;
 
 	VTY_CHECK_XPATH;
 
@@ -95,6 +202,7 @@ int nb_cli_apply_changes(struct vty *vty, const char *xpath_base_fmt, ...)
 		struct nb_node *nb_node;
 		char xpath[XPATH_MAXLEN];
 		struct yang_data *data;
+		int ret;
 
 		/* Handle relative XPaths. */
 		memset(xpath, 0, sizeof(xpath));
@@ -158,34 +266,30 @@ int nb_cli_apply_changes(struct vty *vty, const char *xpath_base_fmt, ...)
 			yang_print_errors(ly_native_ctx, buf, sizeof(buf)));
 	}
 
-	/* Do an implicit "commit" when using the classic CLI mode. */
+	/*
+	 * Do an implicit commit when using the classic CLI mode.
+	 *
+	 * NOTE: the implicit commit might be scheduled to run later when
+	 * too many commands are being sent at the same time. This is a
+	 * protection mechanism where multiple commands are grouped into the
+	 * same configuration transaction, allowing them to be processed much
+	 * faster.
+	 */
 	if (frr_get_cli_mode() == FRR_CLI_CLASSIC) {
-		struct nb_context context = {};
-		char errmsg[BUFSIZ] = {0};
-
-		context.client = NB_CLIENT_CLI;
-		context.user = vty;
-		ret = nb_candidate_commit(&context, vty->candidate_config,
-					  false, NULL, NULL, errmsg,
-					  sizeof(errmsg));
-		if (ret != NB_OK && ret != NB_ERR_NO_CHANGES) {
-			vty_out(vty, "%% Configuration failed.\n\n");
-			vty_show_nb_errors(vty, ret, errmsg);
-
-			/* Regenerate candidate for consistency. */
-			nb_config_replace(vty->candidate_config, running_config,
-					  true);
-			return CMD_WARNING_CONFIG_FAILED;
-		}
+		if (vty->t_pending_commit || nb_cli_backoff_start(vty))
+			return nb_cli_schedule_command(vty);
+		return nb_cli_classic_commit(vty);
 	}
 
 	return CMD_SUCCESS;
 }
 
-int nb_cli_rpc(const char *xpath, struct list *input, struct list *output)
+int nb_cli_rpc(struct vty *vty, const char *xpath, struct list *input,
+	       struct list *output)
 {
 	struct nb_node *nb_node;
 	int ret;
+	char errmsg[BUFSIZ] = {0};
 
 	nb_node = nb_node_find(xpath);
 	if (!nb_node) {
@@ -194,18 +298,21 @@ int nb_cli_rpc(const char *xpath, struct list *input, struct list *output)
 		return CMD_WARNING;
 	}
 
-	ret = nb_callback_rpc(nb_node, xpath, input, output);
+	ret = nb_callback_rpc(nb_node, xpath, input, output, errmsg,
+			      sizeof(errmsg));
 	switch (ret) {
 	case NB_OK:
 		return CMD_SUCCESS;
 	default:
+		if (strlen(errmsg))
+			vty_show_nb_errors(vty, ret, errmsg);
 		return CMD_WARNING;
 	}
 }
 
 void nb_cli_confirmed_commit_clean(struct vty *vty)
 {
-	THREAD_TIMER_OFF(vty->t_confirmed_commit_timeout);
+	thread_cancel(&vty->t_confirmed_commit_timeout);
 	nb_config_free(vty->confirmed_commit_rollback);
 	vty->confirmed_commit_rollback = NULL;
 }
@@ -224,11 +331,14 @@ int nb_cli_confirmed_commit_rollback(struct vty *vty)
 		&context, vty->confirmed_commit_rollback, true,
 		"Rollback to previous configuration - confirmed commit has timed out",
 		&transaction_id, errmsg, sizeof(errmsg));
-	if (ret == NB_OK)
+	if (ret == NB_OK) {
 		vty_out(vty,
 			"Rollback performed successfully (Transaction ID #%u).\n",
 			transaction_id);
-	else {
+		/* Print warnings (if any). */
+		if (strlen(errmsg) > 0)
+			vty_out(vty, "%s\n", errmsg);
+	} else {
 		vty_out(vty,
 			"Failed to rollback to previous configuration.\n\n");
 		vty_show_nb_errors(vty, ret, errmsg);
@@ -267,7 +377,7 @@ static int nb_cli_commit(struct vty *vty, bool force,
 				"%% Resetting confirmed-commit timeout to %u minute(s)\n\n",
 				confirmed_timeout);
 
-			THREAD_TIMER_OFF(vty->t_confirmed_commit_timeout);
+			thread_cancel(&vty->t_confirmed_commit_timeout);
 			thread_add_timer(master,
 					 nb_cli_confirmed_commit_timeout, vty,
 					 confirmed_timeout * 60,
@@ -313,6 +423,9 @@ static int nb_cli_commit(struct vty *vty, bool force,
 		vty_out(vty,
 			"%% Configuration committed successfully (Transaction ID #%u).\n\n",
 			transaction_id);
+		/* Print warnings (if any). */
+		if (strlen(errmsg) > 0)
+			vty_out(vty, "%s\n", errmsg);
 		return CMD_SUCCESS;
 	case NB_ERR_NO_CHANGES:
 		vty_out(vty, "%% No configuration changes to commit.\n\n");
@@ -465,7 +578,7 @@ void nb_cli_show_dnode_cmds(struct vty *vty, struct lyd_node *root,
 		struct nb_node *nb_node;
 
 		nb_node = child->schema->priv;
-		if (!nb_node->cbs.cli_show)
+		if (!nb_node || !nb_node->cbs.cli_show)
 			goto next;
 
 		/* Skip default values. */
@@ -483,7 +596,7 @@ void nb_cli_show_dnode_cmds(struct vty *vty, struct lyd_node *root,
 		parent = ly_iter_next_up(child);
 		if (parent != NULL) {
 			nb_node = parent->schema->priv;
-			if (nb_node->cbs.cli_show_end)
+			if (nb_node && nb_node->cbs.cli_show_end)
 				(*nb_node->cbs.cli_show_end)(vty, parent);
 		}
 
@@ -578,6 +691,12 @@ static int nb_write_config(struct nb_config *config, enum nb_cfg_format format,
 	if (fd < 0) {
 		flog_warn(EC_LIB_SYSTEM_CALL, "%s: mkstemp() failed: %s",
 			  __func__, safe_strerror(errno));
+		return -1;
+	}
+	if (fchmod(fd, CONFIGFILE_MASK) != 0) {
+		flog_warn(EC_LIB_SYSTEM_CALL,
+			  "%s: fchmod() failed: %s(%d):", __func__,
+			  safe_strerror(errno), errno);
 		return -1;
 	}
 
@@ -1572,6 +1691,9 @@ static int nb_cli_rollback_configuration(struct vty *vty,
 	case NB_OK:
 		vty_out(vty,
 			"%% Configuration was successfully rolled back.\n\n");
+		/* Print warnings (if any). */
+		if (strlen(errmsg) > 0)
+			vty_out(vty, "%s\n", errmsg);
 		return CMD_SUCCESS;
 	case NB_ERR_NO_CHANGES:
 		vty_out(vty,
@@ -1704,20 +1826,20 @@ static struct cmd_node nb_debug_node = {
 
 void nb_cli_install_default(int node)
 {
-	install_element(node, &show_config_candidate_section_cmd);
+	_install_element(node, &show_config_candidate_section_cmd);
 
 	if (frr_get_cli_mode() != FRR_CLI_TRANSACTIONAL)
 		return;
 
-	install_element(node, &config_commit_cmd);
-	install_element(node, &config_commit_comment_cmd);
-	install_element(node, &config_commit_check_cmd);
-	install_element(node, &config_update_cmd);
-	install_element(node, &config_discard_cmd);
-	install_element(node, &show_config_running_cmd);
-	install_element(node, &show_config_candidate_cmd);
-	install_element(node, &show_config_compare_cmd);
-	install_element(node, &show_config_transaction_cmd);
+	_install_element(node, &config_commit_cmd);
+	_install_element(node, &config_commit_comment_cmd);
+	_install_element(node, &config_commit_check_cmd);
+	_install_element(node, &config_update_cmd);
+	_install_element(node, &config_discard_cmd);
+	_install_element(node, &show_config_running_cmd);
+	_install_element(node, &show_config_candidate_cmd);
+	_install_element(node, &show_config_compare_cmd);
+	_install_element(node, &show_config_transaction_cmd);
 }
 
 /* YANG module autocomplete. */

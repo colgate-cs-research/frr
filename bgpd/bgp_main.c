@@ -60,6 +60,11 @@
 #include "bgpd/bgp_keepalives.h"
 #include "bgpd/bgp_network.h"
 #include "bgpd/bgp_errors.h"
+#include "bgpd/bgp_script.h"
+#include "lib/routing_nb.h"
+#include "bgpd/bgp_nb.h"
+#include "bgpd/bgp_evpn_mh.h"
+#include "bgpd/bgp_nht.h"
 
 #ifdef ENABLE_BGP_VNC
 #include "bgpd/rfapi/rfapi_backend.h"
@@ -126,16 +131,27 @@ static struct frr_daemon_info bgpd_di;
 /* SIGHUP handler. */
 void sighup(void)
 {
-	zlog_info("SIGHUP received");
+	zlog_info("SIGHUP received, ignoring");
 
+	return;
+
+	/*
+	 * This is turned off for the moment.  There is all
+	 * sorts of config turned off by bgp_terminate
+	 * that is not setup properly again in bgp_reset.
+	 * I see no easy way to do this nor do I see that
+	 * this is a desirable way to reload config
+	 * given the yang work.
+	 */
 	/* Terminate all thread. */
-	bgp_terminate();
-	bgp_reset();
-	zlog_info("bgpd restarting!");
+	/*
+	 * bgp_terminate();
+	 * bgp_reset();
+	 * zlog_info("bgpd restarting!");
 
-	/* Reload config file. */
-	vty_read_config(NULL, bgpd_di.config_file, config_default);
-
+	 * Reload config file.
+	 * vty_read_config(NULL, bgpd_di.config_file, config_default);
+	 */
 	/* Try to return to normal operation. */
 }
 
@@ -194,6 +210,9 @@ static __attribute__((__noreturn__)) void bgp_exit(int status)
 	if (bgp_default)
 		bgp_delete(bgp_default);
 
+	bgp_evpn_mh_finish();
+	bgp_l3nhg_finish();
+
 	/* reverse bgp_dump_init */
 	bgp_dump_finish();
 
@@ -235,6 +254,7 @@ static __attribute__((__noreturn__)) void bgp_exit(int status)
 
 	bf_free(bm->rd_idspace);
 	list_delete(&bm->bgp);
+	list_delete(&bm->addresses);
 
 	bgp_lp_finish();
 
@@ -359,9 +379,11 @@ static void bgp_vrf_terminate(void)
 }
 
 static const struct frr_yang_module_info *const bgpd_yang_modules[] = {
+	&frr_bgp_info,
 	&frr_filter_info,
 	&frr_interface_info,
 	&frr_route_map_info,
+	&frr_routing_info,
 	&frr_vrf_info,
 };
 
@@ -384,12 +406,16 @@ int main(int argc, char **argv)
 	int tmp_port;
 
 	int bgp_port = BGP_PORT_DEFAULT;
-	char *bgp_address = NULL;
+	struct list *addresses = list_new();
 	int no_fib_flag = 0;
 	int no_zebra_flag = 0;
 	int skip_runas = 0;
 	int instance = 0;
 	int buffer_size = BGP_SOCKET_SNDBUF_SIZE;
+	char *address;
+	struct listnode *node;
+
+	addresses->cmp = (int (*)(void *, void *))strcmp;
 
 	frr_preinit(&bgpd_di, argc, argv);
 	frr_opt_add(
@@ -443,7 +469,7 @@ int main(int argc, char **argv)
 			break;
 		}
 		case 'l':
-			bgp_address = optarg;
+			listnode_add_sort_nodup(addresses, optarg);
 		/* listenon implies -n */
 		/* fallthru */
 		case 'n':
@@ -473,11 +499,10 @@ int main(int argc, char **argv)
 		memset(&bgpd_privs, 0, sizeof(bgpd_privs));
 
 	/* BGP master init. */
-	bgp_master_init(frr_init(), buffer_size);
+	bgp_master_init(frr_init(), buffer_size, addresses);
 	bm->port = bgp_port;
 	if (bgp_port == 0)
 		bgp_option_set(BGP_OPT_NO_LISTEN);
-	bm->address = bgp_address;
 	if (no_fib_flag || no_zebra_flag)
 		bgp_option_set(BGP_OPT_NO_FIB);
 	if (no_zebra_flag)
@@ -486,11 +511,27 @@ int main(int argc, char **argv)
 	/* Initializations. */
 	bgp_vrf_init();
 
+#ifdef HAVE_SCRIPTING
+	bgp_script_init();
+#endif
+
+	hook_register(routing_conf_event,
+		      routing_control_plane_protocols_name_validate);
+
+
 	/* BGP related initialization.  */
 	bgp_init((unsigned short)instance);
 
-	snprintf(bgpd_di.startinfo, sizeof(bgpd_di.startinfo), ", bgp@%s:%d",
-		 (bm->address ? bm->address : "<all>"), bm->port);
+	if (list_isempty(bm->addresses)) {
+		snprintf(bgpd_di.startinfo, sizeof(bgpd_di.startinfo),
+			 ", bgp@<all>:%d", bm->port);
+	} else {
+		for (ALL_LIST_ELEMENTS_RO(bm->addresses, node, address))
+			snprintf(bgpd_di.startinfo + strlen(bgpd_di.startinfo),
+				 sizeof(bgpd_di.startinfo)
+					 - strlen(bgpd_di.startinfo),
+				 ", bgp@%s:%d", address, bm->port);
+	}
 
 	frr_config_fork();
 	/* must be called after fork() */

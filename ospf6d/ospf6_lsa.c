@@ -45,7 +45,29 @@
 
 vector ospf6_lsa_handler_vector;
 
-static int ospf6_unknown_lsa_show(struct vty *vty, struct ospf6_lsa *lsa)
+struct ospf6 *ospf6_get_by_lsdb(struct ospf6_lsa *lsa)
+{
+	struct ospf6 *ospf6 = NULL;
+
+	switch (OSPF6_LSA_SCOPE(lsa->header->type)) {
+	case OSPF6_SCOPE_LINKLOCAL:
+		ospf6 = OSPF6_INTERFACE(lsa->lsdb->data)->area->ospf6;
+		break;
+	case OSPF6_SCOPE_AREA:
+		ospf6 = OSPF6_AREA(lsa->lsdb->data)->ospf6;
+		break;
+	case OSPF6_SCOPE_AS:
+		ospf6 = OSPF6_PROCESS(lsa->lsdb->data);
+		break;
+	default:
+		assert(0);
+		break;
+	}
+	return ospf6;
+}
+
+static int ospf6_unknown_lsa_show(struct vty *vty, struct ospf6_lsa *lsa,
+				  json_object *json_obj, bool use_json)
 {
 	uint8_t *start, *end, *current;
 	char byte[4];
@@ -53,18 +75,22 @@ static int ospf6_unknown_lsa_show(struct vty *vty, struct ospf6_lsa *lsa)
 	start = (uint8_t *)lsa->header + sizeof(struct ospf6_lsa_header);
 	end = (uint8_t *)lsa->header + ntohs(lsa->header->length);
 
-	vty_out(vty, "        Unknown contents:\n");
-	for (current = start; current < end; current++) {
-		if ((current - start) % 16 == 0)
-			vty_out(vty, "\n        ");
-		else if ((current - start) % 4 == 0)
-			vty_out(vty, " ");
+	if (use_json)
+		json_object_string_add(json_obj, "LsaType", "unknown");
+	else {
+		vty_out(vty, "        Unknown contents:\n");
+		for (current = start; current < end; current++) {
+			if ((current - start) % 16 == 0)
+				vty_out(vty, "\n        ");
+			else if ((current - start) % 4 == 0)
+				vty_out(vty, " ");
 
-		snprintf(byte, sizeof(byte), "%02x", *current);
-		vty_out(vty, "%s", byte);
+			snprintf(byte, sizeof(byte), "%02x", *current);
+			vty_out(vty, "%s", byte);
+		}
+
+		vty_out(vty, "\n\n");
 	}
-
-	vty_out(vty, "\n\n");
 	return 0;
 }
 
@@ -371,13 +397,15 @@ void ospf6_lsa_show_summary_header(struct vty *vty)
 		"AdvRouter", "Age", "SeqNum", "Payload");
 }
 
-void ospf6_lsa_show_summary(struct vty *vty, struct ospf6_lsa *lsa)
+void ospf6_lsa_show_summary(struct vty *vty, struct ospf6_lsa *lsa,
+			    json_object *json_array, bool use_json)
 {
 	char adv_router[16], id[16];
 	int type;
 	const struct ospf6_lsa_handler *handler;
-	char buf[64], tmpbuf[80];
+	char buf[64];
 	int cnt = 0;
+	json_object *json_obj = NULL;
 
 	assert(lsa);
 	assert(lsa->header);
@@ -388,40 +416,104 @@ void ospf6_lsa_show_summary(struct vty *vty, struct ospf6_lsa *lsa)
 
 	type = ntohs(lsa->header->type);
 	handler = ospf6_get_lsa_handler(lsa->header->type);
+
+	if (use_json)
+		json_obj = json_object_new_object();
+
 	if ((type == OSPF6_LSTYPE_INTER_PREFIX)
 	    || (type == OSPF6_LSTYPE_INTER_ROUTER)
 	    || (type == OSPF6_LSTYPE_AS_EXTERNAL)) {
-		vty_out(vty, "%-4s %-15s%-15s%4hu %8lx %30s\n",
-			ospf6_lstype_short_name(lsa->header->type), id,
-			adv_router, ospf6_lsa_age_current(lsa),
-			(unsigned long)ntohl(lsa->header->seqnum),
-			handler->lh_get_prefix_str(lsa, buf, sizeof(buf), 0));
+		if (use_json) {
+			json_object_string_add(
+				json_obj, "type",
+				ospf6_lstype_short_name(lsa->header->type));
+			json_object_string_add(json_obj, "lsId", id);
+			json_object_string_add(json_obj, "advRouter",
+					       adv_router);
+			json_object_int_add(json_obj, "age",
+					    ospf6_lsa_age_current(lsa));
+			json_object_int_add(
+				json_obj, "seqNum",
+				(unsigned long)ntohl(lsa->header->seqnum));
+			json_object_string_add(
+				json_obj, "payload",
+				handler->lh_get_prefix_str(lsa, buf,
+							   sizeof(buf), 0));
+			json_object_array_add(json_array, json_obj);
+		} else
+			vty_out(vty, "%-4s %-15s%-15s%4hu %8lx %30s\n",
+				ospf6_lstype_short_name(lsa->header->type), id,
+				adv_router, ospf6_lsa_age_current(lsa),
+				(unsigned long)ntohl(lsa->header->seqnum),
+				handler->lh_get_prefix_str(lsa, buf,
+							   sizeof(buf), 0));
 	} else if (type != OSPF6_LSTYPE_UNKNOWN) {
-		snprintf(tmpbuf, sizeof(tmpbuf), "%-4s %-15s%-15s%4hu %8lx",
-			 ospf6_lstype_short_name(lsa->header->type), id,
-			 adv_router, ospf6_lsa_age_current(lsa),
-			 (unsigned long)ntohl(lsa->header->seqnum));
-
 		while (handler->lh_get_prefix_str(lsa, buf, sizeof(buf), cnt)
 		       != NULL) {
-			vty_out(vty, "%s %30s\n", tmpbuf, buf);
+			if (use_json) {
+				json_object_string_add(
+					json_obj, "type",
+					ospf6_lstype_short_name(
+						lsa->header->type));
+				json_object_string_add(json_obj, "lsId", id);
+				json_object_string_add(json_obj, "advRouter",
+						       adv_router);
+				json_object_int_add(json_obj, "age",
+						    ospf6_lsa_age_current(lsa));
+				json_object_int_add(
+					json_obj, "seqNum",
+					(unsigned long)ntohl(
+						lsa->header->seqnum));
+				json_object_string_add(json_obj, "payload",
+						       buf);
+				json_object_array_add(json_array, json_obj);
+				json_obj = json_object_new_object();
+			} else
+				vty_out(vty, "%-4s %-15s%-15s%4hu %8lx %30s\n",
+					ospf6_lstype_short_name(
+						lsa->header->type),
+					id, adv_router,
+					ospf6_lsa_age_current(lsa),
+					(unsigned long)ntohl(
+						lsa->header->seqnum),
+					buf);
 			cnt++;
 		}
+		if (use_json)
+			json_object_free(json_obj);
 	} else {
-		vty_out(vty, "%-4s %-15s%-15s%4hu %8lx\n",
-			ospf6_lstype_short_name(lsa->header->type), id,
-			adv_router, ospf6_lsa_age_current(lsa),
-			(unsigned long)ntohl(lsa->header->seqnum));
+		if (use_json) {
+			json_object_string_add(
+				json_obj, "type",
+				ospf6_lstype_short_name(lsa->header->type));
+			json_object_string_add(json_obj, "lsId", id);
+			json_object_string_add(json_obj, "advRouter",
+					       adv_router);
+			json_object_int_add(json_obj, "age",
+					    ospf6_lsa_age_current(lsa));
+			json_object_int_add(
+				json_obj, "seqNum",
+				(unsigned long)ntohl(lsa->header->seqnum));
+			json_object_array_add(json_array, json_obj);
+		} else
+			vty_out(vty, "%-4s %-15s%-15s%4hu %8lx\n",
+				ospf6_lstype_short_name(lsa->header->type), id,
+				adv_router, ospf6_lsa_age_current(lsa),
+				(unsigned long)ntohl(lsa->header->seqnum));
 	}
 }
 
-void ospf6_lsa_show_dump(struct vty *vty, struct ospf6_lsa *lsa)
+void ospf6_lsa_show_dump(struct vty *vty, struct ospf6_lsa *lsa,
+			 json_object *json_array, bool use_json)
 {
 	uint8_t *start, *end, *current;
 	char byte[4];
 
 	start = (uint8_t *)lsa->header;
 	end = (uint8_t *)lsa->header + ntohs(lsa->header->length);
+
+	if (use_json)
+		return;
 
 	vty_out(vty, "\n");
 	vty_out(vty, "%s:\n", lsa->name);
@@ -437,12 +529,15 @@ void ospf6_lsa_show_dump(struct vty *vty, struct ospf6_lsa *lsa)
 	}
 
 	vty_out(vty, "\n\n");
+
 	return;
 }
 
-void ospf6_lsa_show_internal(struct vty *vty, struct ospf6_lsa *lsa)
+void ospf6_lsa_show_internal(struct vty *vty, struct ospf6_lsa *lsa,
+			     json_object *json_array, bool use_json)
 {
 	char adv_router[64], id[64];
+	json_object *json_obj;
 
 	assert(lsa && lsa->header);
 
@@ -450,30 +545,56 @@ void ospf6_lsa_show_internal(struct vty *vty, struct ospf6_lsa *lsa)
 	inet_ntop(AF_INET, &lsa->header->adv_router, adv_router,
 		  sizeof(adv_router));
 
-	vty_out(vty, "\n");
-	vty_out(vty, "Age: %4hu Type: %s\n", ospf6_lsa_age_current(lsa),
-		ospf6_lstype_name(lsa->header->type));
-	vty_out(vty, "Link State ID: %s\n", id);
-	vty_out(vty, "Advertising Router: %s\n", adv_router);
-	vty_out(vty, "LS Sequence Number: %#010lx\n",
-		(unsigned long)ntohl(lsa->header->seqnum));
-	vty_out(vty, "CheckSum: %#06hx Length: %hu\n",
-		ntohs(lsa->header->checksum), ntohs(lsa->header->length));
-	vty_out(vty, "Flag: %x \n", lsa->flag);
-	vty_out(vty, "Lock: %d \n", lsa->lock);
-	vty_out(vty, "ReTx Count: %d\n", lsa->retrans_count);
-	vty_out(vty, "Threads: Expire: 0x%p, Refresh: 0x%p \n",
-		(void *)lsa->expire, (void *)lsa->refresh);
-	vty_out(vty, "\n");
+	if (use_json) {
+		json_obj = json_object_new_object();
+		json_object_int_add(json_obj, "age",
+				    ospf6_lsa_age_current(lsa));
+		json_object_string_add(json_obj, "type",
+				       ospf6_lstype_name(lsa->header->type));
+		json_object_string_add(json_obj, "linkStateId", id);
+		json_object_string_add(json_obj, "advertisingRouter",
+				       adv_router);
+		json_object_int_add(json_obj, "lsSequenceNumber",
+				    (unsigned long)ntohl(lsa->header->seqnum));
+		json_object_int_add(json_obj, "checksum",
+				    ntohs(lsa->header->checksum));
+		json_object_int_add(json_obj, "length",
+				    ntohs(lsa->header->length));
+		json_object_int_add(json_obj, "flag", lsa->flag);
+		json_object_int_add(json_obj, "lock", lsa->lock);
+		json_object_int_add(json_obj, "reTxCount", lsa->retrans_count);
+
+		/* Threads Data not added */
+		json_object_array_add(json_array, json_obj);
+	} else {
+		vty_out(vty, "\n");
+		vty_out(vty, "Age: %4hu Type: %s\n", ospf6_lsa_age_current(lsa),
+			ospf6_lstype_name(lsa->header->type));
+		vty_out(vty, "Link State ID: %s\n", id);
+		vty_out(vty, "Advertising Router: %s\n", adv_router);
+		vty_out(vty, "LS Sequence Number: %#010lx\n",
+			(unsigned long)ntohl(lsa->header->seqnum));
+		vty_out(vty, "CheckSum: %#06hx Length: %hu\n",
+			ntohs(lsa->header->checksum),
+			ntohs(lsa->header->length));
+		vty_out(vty, "Flag: %x \n", lsa->flag);
+		vty_out(vty, "Lock: %d \n", lsa->lock);
+		vty_out(vty, "ReTx Count: %d\n", lsa->retrans_count);
+		vty_out(vty, "Threads: Expire: 0x%p, Refresh: 0x%p \n",
+			(void *)lsa->expire, (void *)lsa->refresh);
+		vty_out(vty, "\n");
+	}
 	return;
 }
 
-void ospf6_lsa_show(struct vty *vty, struct ospf6_lsa *lsa)
+void ospf6_lsa_show(struct vty *vty, struct ospf6_lsa *lsa,
+		    json_object *json_array, bool use_json)
 {
 	char adv_router[64], id[64];
 	const struct ospf6_lsa_handler *handler;
 	struct timeval now, res;
 	char duration[64];
+	json_object *json_obj = NULL;
 
 	assert(lsa && lsa->header);
 
@@ -484,27 +605,47 @@ void ospf6_lsa_show(struct vty *vty, struct ospf6_lsa *lsa)
 	monotime(&now);
 	timersub(&now, &lsa->installed, &res);
 	timerstring(&res, duration, sizeof(duration));
-
-	vty_out(vty, "Age: %4hu Type: %s\n", ospf6_lsa_age_current(lsa),
-		ospf6_lstype_name(lsa->header->type));
-	vty_out(vty, "Link State ID: %s\n", id);
-	vty_out(vty, "Advertising Router: %s\n", adv_router);
-	vty_out(vty, "LS Sequence Number: %#010lx\n",
-		(unsigned long)ntohl(lsa->header->seqnum));
-	vty_out(vty, "CheckSum: %#06hx Length: %hu\n",
-		ntohs(lsa->header->checksum), ntohs(lsa->header->length));
-	vty_out(vty, "Duration: %s\n", duration);
+	if (use_json) {
+		json_obj = json_object_new_object();
+		json_object_int_add(json_obj, "age",
+				    ospf6_lsa_age_current(lsa));
+		json_object_string_add(json_obj, "type",
+				       ospf6_lstype_name(lsa->header->type));
+		json_object_string_add(json_obj, "advertisingRouter",
+				       adv_router);
+		json_object_int_add(json_obj, "lsSequenceNumber",
+				    (unsigned long)ntohl(lsa->header->seqnum));
+		json_object_int_add(json_obj, "checkSum",
+				    ntohs(lsa->header->checksum));
+		json_object_int_add(json_obj, "length",
+				    ntohs(lsa->header->length));
+		json_object_string_add(json_obj, "duration", duration);
+	} else {
+		vty_out(vty, "Age: %4hu Type: %s\n", ospf6_lsa_age_current(lsa),
+			ospf6_lstype_name(lsa->header->type));
+		vty_out(vty, "Link State ID: %s\n", id);
+		vty_out(vty, "Advertising Router: %s\n", adv_router);
+		vty_out(vty, "LS Sequence Number: %#010lx\n",
+			(unsigned long)ntohl(lsa->header->seqnum));
+		vty_out(vty, "CheckSum: %#06hx Length: %hu\n",
+			ntohs(lsa->header->checksum),
+			ntohs(lsa->header->length));
+		vty_out(vty, "Duration: %s\n", duration);
+	}
 
 	handler = ospf6_get_lsa_handler(lsa->header->type);
 
 	if (handler->lh_show != NULL)
-		handler->lh_show(vty, lsa);
+		handler->lh_show(vty, lsa, json_obj, use_json);
 	else {
 		assert(unknown_handler.lh_show != NULL);
-		unknown_handler.lh_show(vty, lsa);
+		unknown_handler.lh_show(vty, lsa, json_obj, use_json);
 	}
 
-	vty_out(vty, "\n");
+	if (use_json)
+		json_object_array_add(json_array, json_obj);
+	else
+		vty_out(vty, "\n");
 }
 
 /* OSPFv3 LSA creation/deletion function */
@@ -601,10 +742,10 @@ struct ospf6_lsa *ospf6_lsa_copy(struct ospf6_lsa *lsa)
 }
 
 /* increment reference counter of struct ospf6_lsa */
-void ospf6_lsa_lock(struct ospf6_lsa *lsa)
+struct ospf6_lsa *ospf6_lsa_lock(struct ospf6_lsa *lsa)
 {
 	lsa->lock++;
-	return;
+	return lsa;
 }
 
 /* decrement reference counter of struct ospf6_lsa */
@@ -626,6 +767,7 @@ struct ospf6_lsa *ospf6_lsa_unlock(struct ospf6_lsa *lsa)
 int ospf6_lsa_expire(struct thread *thread)
 {
 	struct ospf6_lsa *lsa;
+	struct ospf6 *ospf6;
 
 	lsa = (struct ospf6_lsa *)THREAD_ARG(thread);
 
@@ -642,7 +784,7 @@ int ospf6_lsa_expire(struct thread *thread)
 
 	if (CHECK_FLAG(lsa->flag, OSPF6_LSA_HEADERONLY))
 		return 0; /* dbexchange will do something ... */
-
+	ospf6 = ospf6_get_by_lsdb(lsa);
 	/* reinstall lsa */
 	ospf6_install_lsa(lsa);
 
@@ -703,7 +845,7 @@ int ospf6_lsa_refresh(struct thread *thread)
 	return 0;
 }
 
-void ospf6_flush_self_originated_lsas_now(void)
+void ospf6_flush_self_originated_lsas_now(struct ospf6 *ospf6)
 {
 	struct listnode *node;
 	struct ospf6_area *oa;

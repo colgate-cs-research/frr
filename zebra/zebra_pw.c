@@ -102,7 +102,7 @@ void zebra_pw_del(struct zebra_vrf *zvrf, struct zebra_pw *pw)
 		hook_call(pw_uninstall, pw);
 		dplane_pw_uninstall(pw);
 	} else if (pw->install_retry_timer)
-		THREAD_TIMER_OFF(pw->install_retry_timer);
+		thread_cancel(&pw->install_retry_timer);
 
 	/* unlink and release memory */
 	RB_REMOVE(zebra_pw_head, &zvrf->pseudowires, pw);
@@ -215,12 +215,11 @@ void zebra_pw_install_failure(struct zebra_pw *pw, int pwstatus)
 {
 	if (IS_ZEBRA_DEBUG_PW)
 		zlog_debug(
-			"%u: failed installing pseudowire %s, "
-			"scheduling retry in %u seconds",
+			"%u: failed installing pseudowire %s, scheduling retry in %u seconds",
 			pw->vrf_id, pw->ifname, PW_INSTALL_RETRY_INTERVAL);
 
 	/* schedule to retry later */
-	THREAD_TIMER_OFF(pw->install_retry_timer);
+	thread_cancel(&pw->install_retry_timer);
 	thread_add_timer(zrouter.master, zebra_pw_install_retry, pw,
 			 PW_INSTALL_RETRY_INTERVAL, &pw->install_retry_timer);
 
@@ -518,6 +517,7 @@ static void vty_show_mpls_pseudowire_detail(struct vty *vty)
 	struct zebra_pw *pw;
 	struct route_entry *re;
 	struct nexthop *nexthop;
+	struct nexthop_group *nhg;
 
 	zvrf = vrf_info_lookup(VRF_DEFAULT);
 	if (!zvrf)
@@ -545,22 +545,41 @@ static void vty_show_mpls_pseudowire_detail(struct vty *vty)
 			vty_out(vty, "  VC-ID: %u\n", pw->data.ldp.pwid);
 		vty_out(vty, "  Status: %s \n",
 			(zebra_pw_enabled(pw) && pw->status == PW_FORWARDING)
-				? "Up"
-				: "Down");
+			? "Up"
+			: "Down");
 		re = rib_match(family2afi(pw->af), SAFI_UNICAST, pw->vrf_id,
 			       &pw->nexthop, NULL);
-		if (re) {
-			for (ALL_NEXTHOPS_PTR(rib_active_nhg(re), nexthop)) {
-				snprintfrr(buf_nh, sizeof(buf_nh), "%pNHv",
-					   nexthop);
-				vty_out(vty, "  Next Hop: %s\n", buf_nh);
-				if (nexthop->nh_label)
-					vty_out(vty, "  Next Hop label: %u\n",
-						nexthop->nh_label->label[0]);
-				else
-					vty_out(vty, "  Next Hop label: %s\n",
-						"-");
-			}
+		if (re == NULL)
+			continue;
+
+		nhg = rib_get_fib_nhg(re);
+		for (ALL_NEXTHOPS_PTR(nhg, nexthop)) {
+			snprintfrr(buf_nh, sizeof(buf_nh), "%pNHv",
+				   nexthop);
+			vty_out(vty, "  Next Hop: %s\n", buf_nh);
+			if (nexthop->nh_label)
+				vty_out(vty, "  Next Hop label: %u\n",
+					nexthop->nh_label->label[0]);
+			else
+				vty_out(vty, "  Next Hop label: %s\n",
+					"-");
+		}
+
+		/* Include any installed backups */
+		nhg = rib_get_fib_backup_nhg(re);
+		if (nhg == NULL)
+			continue;
+
+		for (ALL_NEXTHOPS_PTR(nhg, nexthop)) {
+			snprintfrr(buf_nh, sizeof(buf_nh), "%pNHv",
+				   nexthop);
+			vty_out(vty, "  Next Hop: %s\n", buf_nh);
+			if (nexthop->nh_label)
+				vty_out(vty, "  Next Hop label: %u\n",
+					nexthop->nh_label->label[0]);
+			else
+				vty_out(vty, "  Next Hop label: %s\n",
+					"-");
 		}
 	}
 }
@@ -569,6 +588,7 @@ static void vty_show_mpls_pseudowire(struct zebra_pw *pw, json_object *json_pws)
 {
 	struct route_entry *re;
 	struct nexthop *nexthop;
+	struct nexthop_group *nhg;
 	char buf_nbr[INET6_ADDRSTRLEN];
 	char buf_nh[100];
 	json_object *json_pw = NULL;
@@ -603,23 +623,48 @@ static void vty_show_mpls_pseudowire(struct zebra_pw *pw, json_object *json_pws)
 								      : "Down");
 	re = rib_match(family2afi(pw->af), SAFI_UNICAST, pw->vrf_id,
 		       &pw->nexthop, NULL);
-	if (re) {
-		for (ALL_NEXTHOPS_PTR(rib_active_nhg(re), nexthop)) {
-			json_nexthop = json_object_new_object();
-			snprintfrr(buf_nh, sizeof(buf_nh), "%pNHv", nexthop);
-			json_object_string_add(json_nexthop, "nexthop", buf_nh);
-			if (nexthop->nh_label)
-				json_object_int_add(
-					json_nexthop, "nhLabel",
-					nexthop->nh_label->label[0]);
-			else
-				json_object_string_add(json_nexthop, "nhLabel",
-						       "-");
+	if (re == NULL)
+		goto done;
 
-			json_object_array_add(json_nexthops, json_nexthop);
-		}
-		json_object_object_add(json_pw, "nexthops", json_nexthops);
+	nhg = rib_get_fib_nhg(re);
+	for (ALL_NEXTHOPS_PTR(nhg, nexthop)) {
+		json_nexthop = json_object_new_object();
+		snprintfrr(buf_nh, sizeof(buf_nh), "%pNHv", nexthop);
+		json_object_string_add(json_nexthop, "nexthop", buf_nh);
+		if (nexthop->nh_label)
+			json_object_int_add(
+				json_nexthop, "nhLabel",
+				nexthop->nh_label->label[0]);
+		else
+			json_object_string_add(json_nexthop, "nhLabel",
+					       "-");
+
+		json_object_array_add(json_nexthops, json_nexthop);
 	}
+
+	/* Include installed backup nexthops also */
+	nhg = rib_get_fib_backup_nhg(re);
+	if (nhg == NULL)
+		goto done;
+
+	for (ALL_NEXTHOPS_PTR(nhg, nexthop)) {
+		json_nexthop = json_object_new_object();
+		snprintfrr(buf_nh, sizeof(buf_nh), "%pNHv", nexthop);
+		json_object_string_add(json_nexthop, "nexthop", buf_nh);
+		if (nexthop->nh_label)
+			json_object_int_add(
+				json_nexthop, "nhLabel",
+				nexthop->nh_label->label[0]);
+		else
+			json_object_string_add(json_nexthop, "nhLabel",
+					       "-");
+
+		json_object_array_add(json_nexthops, json_nexthop);
+	}
+
+done:
+
+	json_object_object_add(json_pw, "nexthops", json_nexthops);
 	json_object_array_add(json_pws, json_pw);
 }
 
@@ -680,8 +725,7 @@ static int zebra_pw_config(struct vty *vty)
 				pw->local_label, pw->remote_label);
 		else
 			vty_out(vty,
-				" ! Incomplete config, specify the static "
-				"MPLS labels\n");
+				" ! Incomplete config, specify the static MPLS labels\n");
 
 		if (pw->af != AF_UNSPEC) {
 			char buf[INET6_ADDRSTRLEN];
@@ -689,8 +733,7 @@ static int zebra_pw_config(struct vty *vty)
 			vty_out(vty, " neighbor %s\n", buf);
 		} else
 			vty_out(vty,
-				" ! Incomplete config, specify a neighbor "
-				"address\n");
+				" ! Incomplete config, specify a neighbor address\n");
 
 		if (!(pw->flags & F_PSEUDOWIRE_CWORD))
 			vty_out(vty, " control-word exclude\n");

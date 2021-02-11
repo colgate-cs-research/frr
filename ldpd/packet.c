@@ -77,8 +77,7 @@ send_packet(int fd, int af, union ldpd_addr *dst, struct iface_af *ia,
 		if (ia && IN_MULTICAST(ntohl(dst->v4.s_addr))) {
 			/* set outgoing interface for multicast traffic */
 			if (sock_set_ipv4_mcast(ia->iface) == -1) {
-				log_debug("%s: error setting multicast "
-				    "interface, %s", __func__, ia->iface->name);
+				log_debug("%s: error setting multicast interface, %s", __func__, ia->iface->name);
 				return (-1);
 			}
 		}
@@ -87,8 +86,7 @@ send_packet(int fd, int af, union ldpd_addr *dst, struct iface_af *ia,
 		if (ia && IN6_IS_ADDR_MULTICAST(&dst->v6)) {
 			/* set outgoing interface for multicast traffic */
 			if (sock_set_ipv6_mcast(ia->iface) == -1) {
-				log_debug("%s: error setting multicast "
-				    "interface, %s", __func__, ia->iface->name);
+				log_debug("%s: error setting multicast interface, %s", __func__, ia->iface->name);
 				return (-1);
 			}
 		}
@@ -368,8 +366,7 @@ session_accept(struct thread *thread)
 		return (0);
 	}
 	if (nbr->state != NBR_STA_PRESENT) {
-		log_debug("%s: lsr-id %s: rejecting additional transport "
-		    "connection", __func__, inet_ntoa(nbr->id));
+		log_debug("%s: lsr-id %pI4: rejecting additional transport connection", __func__, &nbr->id);
 		close(newfd);
 		return (0);
 	}
@@ -561,8 +558,8 @@ session_read(struct thread *thread)
 				    type);
 				break;
 			default:
-				log_debug("%s: unknown LDP message from nbr %s",
-				    __func__, inet_ntoa(nbr->id));
+				log_debug("%s: unknown LDP message from nbr %pI4",
+				    __func__, &nbr->id);
 				if (!(ntohs(msg->type) & UNKNOWN_FLAG))
 					send_notification(nbr->tcp,
 					    S_UNKNOWN_MSG, msg->id, msg->type);
@@ -665,7 +662,7 @@ session_shutdown(struct nbr *nbr, uint32_t status, uint32_t msg_id,
 	switch (nbr->state) {
 	case NBR_STA_PRESENT:
 		if (nbr_pending_connect(nbr))
-			THREAD_WRITE_OFF(nbr->ev_connect);
+			thread_cancel(&nbr->ev_connect);
 		break;
 	case NBR_STA_INITIAL:
 	case NBR_STA_OPENREC:
@@ -683,8 +680,10 @@ session_shutdown(struct nbr *nbr, uint32_t status, uint32_t msg_id,
 void
 session_close(struct nbr *nbr)
 {
-	log_debug("%s: closing session with lsr-id %s", __func__,
-	    inet_ntoa(nbr->id));
+	log_debug("%s: closing session with lsr-id %pI4", __func__,
+	    &nbr->id);
+
+	ldp_sync_fsm_nbr_event(nbr, LDP_SYNC_EVT_SESSION_CLOSE);
 
 	tcp_close(nbr->tcp);
 	nbr_stop_ktimer(nbr);
@@ -763,7 +762,7 @@ tcp_close(struct tcp_conn *tcp)
 	evbuf_clear(&tcp->wbuf);
 
 	if (tcp->nbr) {
-		THREAD_READ_OFF(tcp->rev);
+		thread_cancel(&tcp->rev);
 		free(tcp->rbuf);
 		tcp->nbr->tcp = NULL;
 	}
@@ -795,7 +794,7 @@ pending_conn_new(int fd, int af, union ldpd_addr *addr)
 void
 pending_conn_del(struct pending_conn *pconn)
 {
-	THREAD_TIMER_OFF(pconn->ev_timeout);
+	thread_cancel(&pconn->ev_timeout);
 	TAILQ_REMOVE(&global.pending_conns, pconn, entry);
 	free(pconn);
 }

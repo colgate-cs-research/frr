@@ -22,6 +22,7 @@
 #include "command.h"
 #include "prefix.h"
 #include "lib/json.h"
+#include "lib/printfrr.h"
 
 #include "bgpd/bgpd.h"
 #include "bgpd/bgp_route.h"
@@ -37,8 +38,8 @@ int show_adj_route_vpn(struct vty *vty, struct peer *peer,
 {
 	struct bgp *bgp;
 	struct bgp_table *table;
-	struct bgp_node *rn;
-	struct bgp_node *rm;
+	struct bgp_dest *dest;
+	struct bgp_dest *rm;
 	int rd_header;
 	int header = 1;
 	json_object *json = NULL;
@@ -76,14 +77,14 @@ int show_adj_route_vpn(struct vty *vty, struct peer *peer,
 		json_object_string_add(json_ocode, "incomplete", "?");
 	}
 
-	for (rn = bgp_table_top(bgp->rib[afi][safi]); rn;
-	     rn = bgp_route_next(rn)) {
-		const struct prefix *rn_p = bgp_node_get_prefix(rn);
+	for (dest = bgp_table_top(bgp->rib[afi][safi]); dest;
+	     dest = bgp_route_next(dest)) {
+		const struct prefix *dest_p = bgp_dest_get_prefix(dest);
 
-		if (prd && memcmp(rn_p->u.val, prd->val, 8) != 0)
+		if (prd && memcmp(dest_p->u.val, prd->val, 8) != 0)
 			continue;
 
-		table = bgp_node_get_bgp_table_info(rn);
+		table = bgp_dest_get_bgp_table_info(dest);
 		if (table == NULL)
 			continue;
 
@@ -109,7 +110,7 @@ int show_adj_route_vpn(struct vty *vty, struct peer *peer,
 					break;
 			}
 
-			if (bgp_node_get_bgp_path_info(rm) == NULL)
+			if (bgp_dest_get_bgp_path_info(rm) == NULL)
 				continue;
 
 			if (!attr)
@@ -117,11 +118,15 @@ int show_adj_route_vpn(struct vty *vty, struct peer *peer,
 
 			if (header) {
 				if (use_json) {
+					char buf[BUFSIZ] = {0};
+
 					json_object_int_add(
 						json, "bgpTableVersion", 0);
 					json_object_string_add(
 						json, "bgpLocalRouterId",
-						inet_ntoa(bgp->router_id));
+						inet_ntop(AF_INET,
+							  &bgp->router_id, buf,
+							  sizeof(buf)));
 					json_object_int_add(
 						json,
 						"defaultLocPrf",
@@ -137,8 +142,8 @@ int show_adj_route_vpn(struct vty *vty, struct peer *peer,
 							       json_ocode);
 				} else {
 					vty_out(vty,
-						"BGP table version is 0, local router ID is %s\n",
-						inet_ntoa(bgp->router_id));
+						"BGP table version is 0, local router ID is %pI4\n",
+						&bgp->router_id);
 					vty_out(vty, "Default local pref %u, ",
 						bgp->default_local_pref);
 					vty_out(vty, "local AS %u\n", bgp->as);
@@ -160,7 +165,7 @@ int show_adj_route_vpn(struct vty *vty, struct peer *peer,
 #endif
 				const uint8_t *pnt;
 
-				pnt = rn_p->u.val;
+				pnt = dest_p->u.val;
 
 				/* Decode RD type. */
 				type = decode_rd_type(pnt);
@@ -184,10 +189,10 @@ int show_adj_route_vpn(struct vty *vty, struct peer *peer,
 							 "%u:%d", rd_as.as,
 							 rd_as.val);
 					else if (type == RD_TYPE_IP)
-						snprintf(rd_str, sizeof(rd_str),
-							 "%s:%d",
-							 inet_ntoa(rd_ip.ip),
-							 rd_ip.val);
+						snprintfrr(rd_str,
+							   sizeof(rd_str),
+							   "%pI4:%d", &rd_ip.ip,
+							   rd_ip.val);
 					json_object_string_add(
 						json_routes,
 						"rd", rd_str);
@@ -199,9 +204,8 @@ int show_adj_route_vpn(struct vty *vty, struct peer *peer,
 						vty_out(vty, "%u:%d", rd_as.as,
 							rd_as.val);
 					else if (type == RD_TYPE_IP)
-						vty_out(vty, "%s:%d",
-							inet_ntoa(rd_ip.ip),
-							rd_ip.val);
+						vty_out(vty, "%pI4:%d",
+							&rd_ip.ip, rd_ip.val);
 #ifdef ENABLE_BGP_VNC
 					else if (type == RD_TYPE_VNC_ETH)
 						vty_out(vty,
@@ -225,8 +229,8 @@ int show_adj_route_vpn(struct vty *vty, struct peer *peer,
 				}
 				rd_header = 0;
 			}
-			route_vty_out_tmp(vty, bgp_node_get_prefix(rm), attr,
-					  safi, use_json, json_routes);
+			route_vty_out_tmp(vty, bgp_dest_get_prefix(rm), attr,
+					  safi, use_json, json_routes, false);
 			output_count++;
 		}
 

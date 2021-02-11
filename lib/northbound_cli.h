@@ -75,6 +75,9 @@ extern int nb_cli_apply_changes(struct vty *vty, const char *xpath_base_fmt,
 /*
  * Execute a YANG RPC or Action.
  *
+ * vty
+ *    The vty terminal to dump any error.
+ *
  * xpath
  *    XPath of the YANG RPC or Action node.
  *
@@ -90,7 +93,7 @@ extern int nb_cli_apply_changes(struct vty *vty, const char *xpath_base_fmt,
  * Returns:
  *    CMD_SUCCESS on success, CMD_WARNING otherwise.
  */
-extern int nb_cli_rpc(const char *xpath, struct list *input,
+extern int nb_cli_rpc(struct vty *vty, const char *xpath, struct list *input,
 		      struct list *output);
 
 /*
@@ -107,6 +110,14 @@ extern int nb_cli_rpc(const char *xpath, struct list *input,
  */
 extern void nb_cli_show_dnode_cmds(struct vty *vty, struct lyd_node *dnode,
 				   bool show_defaults);
+
+/*
+ * Perform pending commit, if any.
+ *
+ * vty
+ *    The vty context.
+ */
+extern void nb_cli_pending_commit_check(struct vty *vty);
 
 /* Prototypes of internal functions. */
 extern void nb_cli_show_config_prepare(struct nb_config *config,

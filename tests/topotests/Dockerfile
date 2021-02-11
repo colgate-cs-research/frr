@@ -19,6 +19,7 @@ RUN export DEBIAN_FRONTEND=noninteractive \
         libjson-c-dev \
         libpcre3-dev \
         libpython-dev \
+        libpython3-dev \
         libreadline-dev \
         libc-ares-dev \
         libcap-dev \
@@ -26,7 +27,10 @@ RUN export DEBIAN_FRONTEND=noninteractive \
         mininet \
         pkg-config \
         python-pip \
-        python-sphinx \
+        python3 \
+        python3-dev \
+        python3-sphinx \
+        python3-pytest \
         rsync \
         strace \
         tcpdump \
@@ -44,7 +48,7 @@ RUN export DEBIAN_FRONTEND=noninteractive \
     && rm -rf /var/lib/apt/lists/*
 
 RUN export DEBIAN_FRONTEND=noninteractive \
-    && apt-key adv --keyserver keyserver.ubuntu.com --recv-key 5418F291D0D4A1AA \
+    && wget -qO- https://deb.frrouting.org/frr/keys.asc | apt-key add - \
     && echo "deb https://deb.frrouting.org/frr bionic frr-stable" > /etc/apt/sources.list.d/frr.list \
     && apt-get update \
     && apt-get install -y libyang-dev \

@@ -185,10 +185,9 @@ int lib_vrf_zebra_ribs_rib_get_keys(struct nb_cb_get_keys_args *args)
 
 	args->keys->num = 2;
 
-	snprintfrr(args->keys->key[0], sizeof(args->keys->key[0]), "%s:%s",
-		   "frr-zebra",
-		   zebra_afi_safi_value2identity(zrt->afi, zrt->safi));
-	snprintfrr(args->keys->key[1], sizeof(args->keys->key[1]), "%" PRIu32,
+	snprintfrr(args->keys->key[0], sizeof(args->keys->key[0]), "%s",
+		   yang_afi_safi_value2identity(zrt->afi, zrt->safi));
+	snprintfrr(args->keys->key[1], sizeof(args->keys->key[1]), "%u",
 		   zrt->tableid);
 
 	return NB_OK;
@@ -205,7 +204,7 @@ lib_vrf_zebra_ribs_rib_lookup_entry(struct nb_cb_lookup_entry_args *args)
 
 	zvrf = zebra_vrf_lookup_by_id(vrf->vrf_id);
 
-	zebra_afi_safi_identity2value(args->keys->key[0], &afi, &safi);
+	yang_afi_safi_identity2value(args->keys->key[0], &afi, &safi);
 	table_id = yang_str2uint32(args->keys->key[1]);
 	/* table_id 0 assume vrf's table_id. */
 	if (!table_id)
@@ -526,54 +525,57 @@ int lib_vrf_zebra_ribs_rib_route_route_entry_nexthop_group_nexthop_get_keys(
 {
 	struct nexthop *nexthop = (struct nexthop *)args->list_entry;
 
-	args->keys->num = 3;
+	args->keys->num = 4;
 
 	strlcpy(args->keys->key[0], yang_nexthop_type2str(nexthop->type),
 		sizeof(args->keys->key[0]));
 
+	snprintfrr(args->keys->key[1], sizeof(args->keys->key[1]), "%" PRIu32,
+		   nexthop->vrf_id);
+
 	switch (nexthop->type) {
 	case NEXTHOP_TYPE_IPV4:
 	case NEXTHOP_TYPE_IPV4_IFINDEX:
-		snprintfrr(args->keys->key[1], sizeof(args->keys->key[1]),
+		snprintfrr(args->keys->key[2], sizeof(args->keys->key[2]),
 			   "%pI4", &nexthop->gate.ipv4);
 		if (nexthop->ifindex)
-			strlcpy(args->keys->key[2],
+			strlcpy(args->keys->key[3],
 				ifindex2ifname(nexthop->ifindex,
 					       nexthop->vrf_id),
-				sizeof(args->keys->key[2]));
+				sizeof(args->keys->key[3]));
 		else
 			/* no ifindex */
-			strlcpy(args->keys->key[2], " ",
-				sizeof(args->keys->key[2]));
+			strlcpy(args->keys->key[3], " ",
+				sizeof(args->keys->key[3]));
 
 		break;
 	case NEXTHOP_TYPE_IPV6:
 	case NEXTHOP_TYPE_IPV6_IFINDEX:
-		snprintfrr(args->keys->key[1], sizeof(args->keys->key[1]),
+		snprintfrr(args->keys->key[2], sizeof(args->keys->key[2]),
 			   "%pI6", &nexthop->gate.ipv6);
 
 		if (nexthop->ifindex)
-			strlcpy(args->keys->key[2],
+			strlcpy(args->keys->key[3],
 				ifindex2ifname(nexthop->ifindex,
 					       nexthop->vrf_id),
-				sizeof(args->keys->key[2]));
+				sizeof(args->keys->key[3]));
 		else
 			/* no ifindex */
-			strlcpy(args->keys->key[2], " ",
-				sizeof(args->keys->key[2]));
+			strlcpy(args->keys->key[3], " ",
+				sizeof(args->keys->key[3]));
 
 		break;
 	case NEXTHOP_TYPE_IFINDEX:
-		strlcpy(args->keys->key[1], "", sizeof(args->keys->key[1]));
-		strlcpy(args->keys->key[2],
+		strlcpy(args->keys->key[2], "", sizeof(args->keys->key[2]));
+		strlcpy(args->keys->key[3],
 			ifindex2ifname(nexthop->ifindex, nexthop->vrf_id),
-			sizeof(args->keys->key[2]));
+			sizeof(args->keys->key[3]));
 
 		break;
 	case NEXTHOP_TYPE_BLACKHOLE:
 		/* Gateway IP */
-		strlcpy(args->keys->key[1], "", sizeof(args->keys->key[1]));
-		strlcpy(args->keys->key[2], " ", sizeof(args->keys->key[2]));
+		strlcpy(args->keys->key[2], "", sizeof(args->keys->key[2]));
+		strlcpy(args->keys->key[3], " ", sizeof(args->keys->key[3]));
 		break;
 	default:
 		break;
@@ -800,6 +802,22 @@ lib_vrf_zebra_ribs_rib_route_route_entry_nexthop_group_nexthop_onlink_get_elem(
 
 	if (CHECK_FLAG(nexthop->flags, NEXTHOP_FLAG_ONLINK))
 		return yang_data_new_bool(args->xpath, true);
+
+	return NULL;
+}
+
+/*
+ * XPath:
+ * /frr-vrf:lib/vrf/frr-zebra:zebra/ribs/rib/route/route-entry/nexthop-group/nexthop/srte-color
+ */
+struct yang_data *
+lib_vrf_zebra_ribs_rib_route_route_entry_nexthop_group_nexthop_color_get_elem(
+	struct nb_cb_get_elem_args *args)
+{
+	struct nexthop *nexthop = (struct nexthop *)args->list_entry;
+
+	if (CHECK_FLAG(nexthop->flags, NEXTHOP_FLAG_SRTE))
+		return yang_data_new_uint32(args->xpath, nexthop->srte_color);
 
 	return NULL;
 }

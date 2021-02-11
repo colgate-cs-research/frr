@@ -156,13 +156,10 @@ void zebra_ptm_finish(void)
 	if (ptm_cb.in_data)
 		free(ptm_cb.in_data);
 
-	/* Release threads. */
-	if (ptm_cb.t_read)
-		thread_cancel(ptm_cb.t_read);
-	if (ptm_cb.t_write)
-		thread_cancel(ptm_cb.t_write);
-	if (ptm_cb.t_timer)
-		thread_cancel(ptm_cb.t_timer);
+	/* Cancel events. */
+	thread_cancel(&ptm_cb.t_read);
+	thread_cancel(&ptm_cb.t_write);
+	thread_cancel(&ptm_cb.t_timer);
 
 	if (ptm_cb.wb)
 		buffer_free(ptm_cb.wb);
@@ -218,7 +215,7 @@ static int zebra_ptm_send_message(char *data, int size)
 				 ptm_cb.reconnect_time, &ptm_cb.t_timer);
 		return -1;
 	case BUFFER_EMPTY:
-		THREAD_OFF(ptm_cb.t_write);
+		thread_cancel(&ptm_cb.t_write);
 		break;
 	case BUFFER_PENDING:
 		thread_add_write(zrouter.master, zebra_ptm_flush_messages, NULL,
@@ -434,8 +431,7 @@ static void if_bfd_session_update(struct interface *ifp, struct prefix *dp,
 
 		if (ifp) {
 			zlog_debug(
-				"MESSAGE: ZEBRA_INTERFACE_BFD_DEST_UPDATE %s/%d on %s"
-				" %s event",
+				"MESSAGE: ZEBRA_INTERFACE_BFD_DEST_UPDATE %s/%d on %s %s event",
 				inet_ntop(dp->family, &dp->u.prefix, buf[0],
 					  INET6_ADDRSTRLEN),
 				dp->prefixlen, ifp->name,
@@ -444,8 +440,7 @@ static void if_bfd_session_update(struct interface *ifp, struct prefix *dp,
 			struct vrf *vrf = vrf_lookup_by_id(vrf_id);
 
 			zlog_debug(
-				"MESSAGE: ZEBRA_INTERFACE_BFD_DEST_UPDATE %s/%d "
-				"with src %s/%d and vrf %s(%u) %s event",
+				"MESSAGE: ZEBRA_INTERFACE_BFD_DEST_UPDATE %s/%d with src %s/%d and vrf %s(%u) %s event",
 				inet_ntop(dp->family, &dp->u.prefix, buf[0],
 					  INET6_ADDRSTRLEN),
 				dp->prefixlen,
@@ -502,8 +497,7 @@ static int zebra_ptm_handle_bfd_msg(void *arg, void *in_ctxt,
 
 	if (IS_ZEBRA_DEBUG_EVENT)
 		zlog_debug(
-			"%s: Recv Port [%s] bfd status [%s] vrf [%s]"
-			" peer [%s] local [%s]",
+			"%s: Recv Port [%s] bfd status [%s] vrf [%s] peer [%s] local [%s]",
 			__func__, ifp ? ifp->name : "N/A", bfdst_str, vrf_str,
 			dest_str, src_str);
 

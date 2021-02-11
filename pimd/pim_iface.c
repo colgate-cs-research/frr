@@ -341,7 +341,7 @@ pim_sec_addr_find(struct pim_interface *pim_ifp, struct prefix *addr)
 	struct listnode *node;
 
 	for (ALL_LIST_ELEMENTS_RO(pim_ifp->sec_addr_list, node, sec_addr)) {
-		if (prefix_cmp(&sec_addr->addr, addr)) {
+		if (prefix_cmp(&sec_addr->addr, addr) == 0) {
 			return sec_addr;
 		}
 	}
@@ -518,15 +518,12 @@ void pim_if_addr_add(struct connected *ifc)
 	if (!if_is_operative(ifp))
 		return;
 
-	if (PIM_DEBUG_ZEBRA) {
-		char buf[BUFSIZ];
-		prefix2str(ifc->address, buf, BUFSIZ);
-		zlog_debug("%s: %s ifindex=%d connected IP address %s %s",
-			   __func__, ifp->name, ifp->ifindex, buf,
+	if (PIM_DEBUG_ZEBRA)
+		zlog_debug("%s: %s ifindex=%d connected IP address %pFX %s",
+			   __func__, ifp->name, ifp->ifindex, ifc->address,
 			   CHECK_FLAG(ifc->flags, ZEBRA_IFA_SECONDARY)
 				   ? "secondary"
 				   : "primary");
-	}
 
 	ifaddr = ifc->address->u.prefix4;
 
@@ -715,15 +712,12 @@ void pim_if_addr_del(struct connected *ifc, int force_prim_as_any)
 	ifp = ifc->ifp;
 	zassert(ifp);
 
-	if (PIM_DEBUG_ZEBRA) {
-		char buf[BUFSIZ];
-		prefix2str(ifc->address, buf, BUFSIZ);
-		zlog_debug("%s: %s ifindex=%d disconnected IP address %s %s",
-			   __func__, ifp->name, ifp->ifindex, buf,
+	if (PIM_DEBUG_ZEBRA)
+		zlog_debug("%s: %s ifindex=%d disconnected IP address %pFX %s",
+			   __func__, ifp->name, ifp->ifindex, ifc->address,
 			   CHECK_FLAG(ifc->flags, ZEBRA_IFA_SECONDARY)
 				   ? "secondary"
 				   : "primary");
-	}
 
 	detect_address_change(ifp, force_prim_as_any, __func__);
 
@@ -1180,7 +1174,7 @@ long pim_if_t_suppressed_msec(struct interface *ifp)
 	zassert(pim_ifp);
 
 	/* join suppression disabled ? */
-	if (PIM_IF_TEST_PIM_CAN_DISABLE_JOIN_SUPRESSION(pim_ifp->options))
+	if (PIM_IF_TEST_PIM_CAN_DISABLE_JOIN_SUPPRESSION(pim_ifp->options))
 		return 0;
 
 	/* t_suppressed = t_periodic * rand(1.1, 1.4) */
@@ -1504,14 +1498,14 @@ void pim_if_create_pimreg(struct pim_instance *pim)
 	}
 }
 
-int pim_if_connected_to_source(struct interface *ifp, struct in_addr src)
+struct prefix *pim_if_connected_to_source(struct interface *ifp, struct in_addr src)
 {
 	struct listnode *cnode;
 	struct connected *c;
 	struct prefix p;
 
 	if (!ifp)
-		return 0;
+		return NULL;
 
 	p.family = AF_INET;
 	p.u.prefix4 = src;
@@ -1520,11 +1514,11 @@ int pim_if_connected_to_source(struct interface *ifp, struct in_addr src)
 	for (ALL_LIST_ELEMENTS_RO(ifp->connected, cnode, c)) {
 		if ((c->address->family == AF_INET)
 		    && prefix_match(CONNECTED_PREFIX(c), &p)) {
-			return 1;
+			return CONNECTED_PREFIX(c);
 		}
 	}
 
-	return 0;
+	return NULL;
 }
 
 bool pim_if_is_vrf_device(struct interface *ifp)

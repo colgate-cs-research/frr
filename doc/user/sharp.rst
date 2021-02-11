@@ -33,7 +33,7 @@ All sharp commands are under the enable node and preceded by the ``sharp``
 keyword. At present, no sharp commands will be preserved in the config.
 
 .. index:: sharp install
-.. clicmd:: sharp install routes A.B.C.D <nexthop <E.F.G.H|X:X::X:X>|nexthop-group NAME> (1-1000000) [instance (0-255)] [repeat (2-1000)]
+.. clicmd:: sharp install routes A.B.C.D <nexthop <E.F.G.H|X:X::X:X>|nexthop-group NAME> (1-1000000) [instance (0-255)] [repeat (2-1000)] [opaque WORD]
 
    Install up to 1,000,000 (one million) /32 routes starting at ``A.B.C.D``
    with specified nexthop ``E.F.G.H`` or ``X:X::X:X``. The nexthop is
@@ -46,7 +46,8 @@ keyword. At present, no sharp commands will be preserved in the config.
    receives success notifications for all routes this is logged as well.
    Instance (0-255) if specified causes the routes to be installed in a different
    instance. If repeat is used then we will install/uninstall the routes the
-   number of times specified.
+   number of times specified.  If the keyword opaque is specified then the
+   next word is sent down to zebra as part of the route installation.
 
 .. index:: sharp remove
 .. clicmd:: sharp remove routes A.B.C.D (1-1000000)
@@ -78,7 +79,8 @@ keyword. At present, no sharp commands will be preserved in the config.
    The nexthop or import choice chooses the type of nexthop we are asking
    zebra to watch for us.  This choice affects zebra's decision on what
    matches.  Connected tells zebra whether or not that we want the route
-   matched against to be a static or connected route.  The no form of
+   matched against to be a static or connected route for the nexthop keyword,
+   for the import keyword connected means exact match.  The no form of
    the command obviously turns this watching off.
 
 .. index:: sharp data nexthop
@@ -88,13 +90,13 @@ keyword. At present, no sharp commands will be preserved in the config.
    may have been turned on.
 
 .. index:: sharp lsp
-.. clicmd:: sharp lsp (0-100000) nexthop-group NAME [prefix A.B.C.D/M TYPE [instance (0-255)]]
+.. clicmd:: sharp lsp [update] (0-100000) nexthop-group NAME [prefix A.B.C.D/M TYPE [instance (0-255)]]
 
    Install an LSP using the specified in-label, with nexthops as
-   listed in nexthop-group ``NAME``. The LSP is installed as type
-   ZEBRA_LSP_SHARP. If ``prefix`` is specified, an existing route with
-   type ``TYPE`` (and optional ``instance`` id) will be updated to use
-   the LSP.
+   listed in nexthop-group ``NAME``. If ``update`` is included, the
+   update path is used. The LSP is installed as type ZEBRA_LSP_SHARP.
+   If ``prefix`` is specified, an existing route with type ``TYPE``
+   (and optional ``instance`` id) will be updated to use the LSP.
 
 .. index:: sharp remove lsp
 .. clicmd:: sharp remove lsp (0-100000) nexthop-group NAME [prefix A.B.C.D/M TYPE [instance (0-255)]]
@@ -125,3 +127,21 @@ keyword. At present, no sharp commands will be preserved in the config.
    single subtype. The messages must specify a protocol daemon by
    name, and can include optional zapi ``instance`` and ``session``
    values.
+
+.. index:: sharp create session
+.. clicmd:: sharp create session (1-1024)
+
+   Create an additional zapi client session for testing, using the
+   specified session id.
+
+.. index:: sharp remove session
+.. clicmd:: sharp remove session (1-1024)
+
+   Remove a test zapi client session that was created with the
+   specified session id.
+
+.. index:: sharp neigh discover
+.. clicmd:: sharp neigh discover [vrf NAME] <A.B.C.D|X:X::X:X> IFNAME
+
+   Send an ARP/NDP request to trigger the addition of a neighbor in the ARP
+   table.

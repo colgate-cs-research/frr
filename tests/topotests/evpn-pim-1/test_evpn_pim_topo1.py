@@ -34,6 +34,8 @@ import pytest
 import json
 from functools import partial
 
+pytestmark = pytest.mark.pimd
+
 # Save the Current Working Directory to find configuration files.
 CWD = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(CWD, "../"))
@@ -123,7 +125,7 @@ def setup_module(module):
     # tgen.mininet_cli()
     # This is a sample of configuration loading.
     router_list = tgen.routers()
-    for rname, router in router_list.iteritems():
+    for rname, router in router_list.items():
         router.load_config(
             TopoRouter.RD_ZEBRA, os.path.join(CWD, "{}/zebra.conf".format(rname))
         )

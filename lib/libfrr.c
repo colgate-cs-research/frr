@@ -43,8 +43,10 @@
 #include "frrcu.h"
 #include "frr_pthread.h"
 #include "defaults.h"
+#include "frrscript.h"
 
 DEFINE_HOOK(frr_late_init, (struct thread_master * tm), (tm))
+DEFINE_HOOK(frr_very_late_init, (struct thread_master * tm), (tm))
 DEFINE_KOOH(frr_early_fini, (), ())
 DEFINE_KOOH(frr_fini, (), ())
 
@@ -54,6 +56,7 @@ char frr_vtydir[256];
 const char frr_dbdir[] = DAEMON_DB_DIR;
 #endif
 const char frr_moduledir[] = MODULE_PATH;
+const char frr_scriptdir[] = SCRIPT_PATH;
 
 char frr_protoname[256] = "NONE";
 char frr_protonameinst[256] = "NONE";
@@ -98,6 +101,8 @@ static void opt_extend(const struct optspec *os)
 #define OPTION_TCLI      1005
 #define OPTION_DB_FILE   1006
 #define OPTION_LOGGING   1007
+#define OPTION_LIMIT_FDS 1008
+#define OPTION_SCRIPTDIR 1009
 
 static const struct option lo_always[] = {
 	{"help", no_argument, NULL, 'h'},
@@ -105,25 +110,31 @@ static const struct option lo_always[] = {
 	{"daemon", no_argument, NULL, 'd'},
 	{"module", no_argument, NULL, 'M'},
 	{"profile", required_argument, NULL, 'F'},
+	{"pathspace", required_argument, NULL, 'N'},
 	{"vty_socket", required_argument, NULL, OPTION_VTYSOCK},
 	{"moduledir", required_argument, NULL, OPTION_MODULEDIR},
+	{"scriptdir", required_argument, NULL, OPTION_SCRIPTDIR},
 	{"log", required_argument, NULL, OPTION_LOG},
 	{"log-level", required_argument, NULL, OPTION_LOGLEVEL},
 	{"tcli", no_argument, NULL, OPTION_TCLI},
 	{"command-log-always", no_argument, NULL, OPTION_LOGGING},
+	{"limit-fds", required_argument, NULL, OPTION_LIMIT_FDS},
 	{NULL}};
 static const struct optspec os_always = {
-	"hvdM:F:",
+	"hvdM:F:N:",
 	"  -h, --help         Display this help and exit\n"
 	"  -v, --version      Print program version\n"
 	"  -d, --daemon       Runs in daemon mode\n"
 	"  -M, --module       Load specified module\n"
 	"  -F, --profile      Use specified configuration profile\n"
+	"  -N, --pathspace    Insert prefix into config & socket paths\n"
 	"      --vty_socket   Override vty socket path\n"
 	"      --moduledir    Override modules directory\n"
+	"      --scriptdir    Override scripts directory\n"
 	"      --log          Set Logging to stdout, syslog, or file:<name>\n"
 	"      --log-level    Set Logging Level to use, debug, info, warn, etc\n"
-	"      --tcli         Use transaction-based CLI\n",
+	"      --tcli         Use transaction-based CLI\n"
+	"      --limit-fds    Limit number of fds supported\n",
 	lo_always};
 
 
@@ -133,18 +144,16 @@ static const struct option lo_cfg_pid_dry[] = {
 #ifdef HAVE_SQLITE3
 	{"db_file", required_argument, NULL, OPTION_DB_FILE},
 #endif
-	{"pathspace", required_argument, NULL, 'N'},
 	{"dryrun", no_argument, NULL, 'C'},
 	{"terminal", no_argument, NULL, 't'},
 	{NULL}};
 static const struct optspec os_cfg_pid_dry = {
-	"f:i:CtN:",
+	"f:i:Ct",
 	"  -f, --config_file  Set configuration file name\n"
 	"  -i, --pid_file     Set process identifier file name\n"
 #ifdef HAVE_SQLITE3
 	"      --db_file      Set database file name\n"
 #endif
-	"  -N, --pathspace    Insert prefix into config & socket paths\n"
 	"  -C, --dryrun       Check configuration for validity and exit\n"
 	"  -t, --terminal     Open terminal session on stdio\n"
 	"  -d -t              Daemonize after terminal session ends\n",
@@ -428,8 +437,6 @@ static int frr_opt(int opt)
 		di->config_file = optarg;
 		break;
 	case 'N':
-		if (di->flags & FRR_NO_CFG_PID_DRY)
-			return 1;
 		if (di->pathspace) {
 			fprintf(stderr,
 				"-N/--pathspace option specified more than once!\n");
@@ -531,6 +538,14 @@ static int frr_opt(int opt)
 		}
 		di->module_path = optarg;
 		break;
+	case OPTION_SCRIPTDIR:
+		if (di->script_path) {
+			fprintf(stderr, "--scriptdir option specified more than once!\n");
+			errors++;
+			break;
+		}
+		di->script_path = optarg;
+		break;
 	case OPTION_TCLI:
 		di->cli_mode = FRR_CLI_TRANSACTIONAL;
 		break;
@@ -552,6 +567,9 @@ static int frr_opt(int opt)
 		break;
 	case OPTION_LOGGING:
 		di->log_always = true;
+		break;
+	case OPTION_LIMIT_FDS:
+		di->limit_fds = strtoul(optarg, &err, 0);
 		break;
 	default:
 		return 1;
@@ -712,6 +730,9 @@ struct thread_master *frr_init(void)
 	lib_cmd_init();
 
 	frr_pthread_init();
+#ifdef HAVE_SCRIPTING
+	frrscript_init(di->script_path ? di->script_path : frr_scriptdir);
+#endif
 
 	log_ref_init();
 	log_ref_vty_init();
@@ -721,7 +742,7 @@ struct thread_master *frr_init(void)
 
 	debug_init_cli();
 
-	nb_init(master, di->yang_modules, di->n_yang_modules);
+	nb_init(master, di->yang_modules, di->n_yang_modules, true);
 	if (nb_db_init() != NB_OK)
 		flog_warn(EC_LIB_NB_DATABASE,
 			  "%s: failed to initialize northbound database",
@@ -738,6 +759,11 @@ const char *frr_get_progname(void)
 enum frr_cli_mode frr_get_cli_mode(void)
 {
 	return di ? di->cli_mode : FRR_CLI_CLASSIC;
+}
+
+uint32_t frr_get_fd_limit(void)
+{
+	return di ? di->limit_fds : 0;
 }
 
 static int rcvd_signal = 0;
@@ -914,6 +940,8 @@ static int frr_config_read_in(struct thread *t)
 				"%s: failed to read configuration file: %s (%s)",
 				__func__, nb_err_name(ret), errmsg);
 	}
+
+	hook_call(frr_very_late_init, master);
 
 	return 0;
 }

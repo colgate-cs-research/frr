@@ -52,6 +52,7 @@
 #include "printfrr.h"
 #include "frrcu.h"
 #include "zlog.h"
+#include "libfrr_trace.h"
 
 DEFINE_MTYPE_STATIC(LIB, LOG_MESSAGE,  "log message")
 DEFINE_MTYPE_STATIC(LIB, LOG_TLSBUF,   "log thread-local buffer")
@@ -93,6 +94,7 @@ struct zlog_msg {
 
 	const char *fmt;
 	va_list args;
+	const struct xref_logmsg *xref;
 
 	char *stackbuf;
 	size_t stackbufsz;
@@ -246,10 +248,10 @@ void zlog_tls_buffer_init(void)
 	fchown(mmfd, zlog_uid, zlog_gid);
 
 #ifdef HAVE_POSIX_FALLOCATE
-	if (posix_fallocate(mmfd, 0, TLS_LOG_BUF_SIZE) < 0) {
-#else
-	if (ftruncate(mmfd, TLS_LOG_BUF_SIZE) < 0) {
+	if (posix_fallocate(mmfd, 0, TLS_LOG_BUF_SIZE) != 0)
+	/* note next statement is under above if() */
 #endif
+	if (ftruncate(mmfd, TLS_LOG_BUF_SIZE) < 0) {
 		zlog_err("failed to allocate thread log buffer \"%s\": %s",
 			 mmpath, strerror(errno));
 		goto out_anon_unlink;
@@ -348,12 +350,14 @@ void zlog_tls_buffer_flush(void)
 }
 
 
-static void vzlog_notls(int prio, const char *fmt, va_list ap)
+static void vzlog_notls(const struct xref_logmsg *xref, int prio,
+			const char *fmt, va_list ap)
 {
 	struct zlog_target *zt;
 	struct zlog_msg stackmsg = {
 		.prio = prio & LOG_PRIMASK,
 		.fmt = fmt,
+		.xref = xref,
 	}, *msg = &stackmsg;
 	char stackbuf[512];
 
@@ -378,8 +382,8 @@ static void vzlog_notls(int prio, const char *fmt, va_list ap)
 		XFREE(MTYPE_LOG_MESSAGE, msg->text);
 }
 
-static void vzlog_tls(struct zlog_tls *zlog_tls, int prio,
-		      const char *fmt, va_list ap)
+static void vzlog_tls(struct zlog_tls *zlog_tls, const struct xref_logmsg *xref,
+		      int prio, const char *fmt, va_list ap)
 {
 	struct zlog_target *zt;
 	struct zlog_msg *msg;
@@ -412,6 +416,7 @@ static void vzlog_tls(struct zlog_tls *zlog_tls, int prio,
 	msg->stackbufsz = TLS_LOG_BUF_SIZE - zlog_tls->bufpos - 1;
 	msg->fmt = fmt;
 	msg->prio = prio & LOG_PRIMASK;
+	msg->xref = xref;
 	if (msg->prio < LOG_INFO)
 		immediate = true;
 
@@ -446,14 +451,43 @@ static void vzlog_tls(struct zlog_tls *zlog_tls, int prio,
 		XFREE(MTYPE_LOG_MESSAGE, msg->text);
 }
 
-void vzlog(int prio, const char *fmt, va_list ap)
+void vzlogx(const struct xref_logmsg *xref, int prio,
+	    const char *fmt, va_list ap)
 {
 	struct zlog_tls *zlog_tls = zlog_tls_get();
 
+#ifdef HAVE_LTTNG
+	va_list copy;
+	va_copy(copy, ap);
+	char *msg = vasprintfrr(MTYPE_LOG_MESSAGE, fmt, copy);
+
+	switch (prio) {
+	case LOG_ERR:
+		frrtracelog(TRACE_ERR, msg);
+		break;
+	case LOG_WARNING:
+		frrtracelog(TRACE_WARNING, msg);
+		break;
+	case LOG_DEBUG:
+		frrtracelog(TRACE_DEBUG, msg);
+		break;
+	case LOG_NOTICE:
+		frrtracelog(TRACE_DEBUG, msg);
+		break;
+	case LOG_INFO:
+	default:
+		frrtracelog(TRACE_INFO, msg);
+		break;
+	}
+
+	va_end(copy);
+	XFREE(MTYPE_LOG_MESSAGE, msg);
+#endif
+
 	if (zlog_tls)
-		vzlog_tls(zlog_tls, prio, fmt, ap);
+		vzlog_tls(zlog_tls, xref, prio, fmt, ap);
 	else
-		vzlog_notls(prio, fmt, ap);
+		vzlog_notls(xref, prio, fmt, ap);
 }
 
 void zlog_sigsafe(const char *text, size_t len)
@@ -485,6 +519,11 @@ void zlog_sigsafe(const char *text, size_t len)
 int zlog_msg_prio(struct zlog_msg *msg)
 {
 	return msg->prio;
+}
+
+const struct xref_logmsg *zlog_msg_xref(struct zlog_msg *msg)
+{
+	return msg->xref;
 }
 
 const char *zlog_msg_text(struct zlog_msg *msg, size_t *textlen)

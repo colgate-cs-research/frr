@@ -27,6 +27,7 @@
 #include "log.h"
 #include "jhash.h"
 #include "lib_errors.h"
+#include "printfrr.h"
 
 DEFINE_MTYPE_STATIC(LIB, SOCKUNION, "Socket union")
 
@@ -406,8 +407,7 @@ int sockopt_v6only(int family, int sock)
 				 sizeof(int));
 		if (ret < 0) {
 			flog_err(EC_LIB_SOCKET,
-				 "can't set sockopt IPV6_V6ONLY "
-				 "to socket %d",
+				 "can't set sockopt IPV6_V6ONLY to socket %d",
 				 sock);
 			return -1;
 		}
@@ -587,15 +587,11 @@ static void __attribute__((unused)) sockunion_print(const union sockunion *su)
 
 	switch (su->sa.sa_family) {
 	case AF_INET:
-		printf("%s\n", inet_ntoa(su->sin.sin_addr));
+		printf("%pI4\n", &su->sin.sin_addr);
 		break;
-	case AF_INET6: {
-		char buf[SU_ADDRSTRLEN];
-
-		printf("%s\n", inet_ntop(AF_INET6, &(su->sin6.sin6_addr), buf,
-					 sizeof(buf)));
-	} break;
-
+	case AF_INET6:
+		printf("%pI6\n", &su->sin6.sin6_addr);
+		break;
 #ifdef AF_LINK
 	case AF_LINK: {
 		struct sockaddr_dl *sdl;
@@ -665,4 +661,67 @@ void sockunion_free(union sockunion *su)
 void sockunion_init(union sockunion *su)
 {
 	memset(su, 0, sizeof(union sockunion));
+}
+
+printfrr_ext_autoreg_p("SU", printfrr_psu)
+static ssize_t printfrr_psu(char *buf, size_t bsz, const char *fmt,
+			    int prec, const void *ptr)
+{
+	const union sockunion *su = ptr;
+	struct fbuf fb = { .buf = buf, .pos = buf, .len = bsz - 1 };
+	bool include_port = false;
+	bool endflags = false;
+	ssize_t consumed = 2;
+
+	while (!endflags) {
+		switch (fmt[consumed++]) {
+		case 'p':
+			include_port = true;
+			break;
+		default:
+			consumed--;
+			endflags = true;
+			break;
+		}
+	};
+
+	switch (sockunion_family(su)) {
+	case AF_UNSPEC:
+		bprintfrr(&fb, "(unspec)");
+		break;
+	case AF_INET:
+		inet_ntop(AF_INET, &su->sin.sin_addr, buf, bsz);
+		fb.pos += strlen(fb.buf);
+		if (include_port)
+			bprintfrr(&fb, ":%d", su->sin.sin_port);
+		break;
+	case AF_INET6:
+		inet_ntop(AF_INET6, &su->sin6.sin6_addr, buf, bsz);
+		fb.pos += strlen(fb.buf);
+		if (include_port)
+			bprintfrr(&fb, ":%d", su->sin6.sin6_port);
+		break;
+	default:
+		bprintfrr(&fb, "(af %d)", sockunion_family(su));
+	}
+
+	fb.pos[0] = '\0';
+	return consumed;
+}
+
+int sockunion_is_null(const union sockunion *su)
+{
+	unsigned char null_s6_addr[16] = {0};
+
+	switch (sockunion_family(su)) {
+	case AF_UNSPEC:
+		return 1;
+	case AF_INET:
+		return (su->sin.sin_addr.s_addr == 0);
+	case AF_INET6:
+		return !memcmp(su->sin6.sin6_addr.s6_addr, null_s6_addr,
+			       sizeof(null_s6_addr));
+	default:
+		return 0;
+	}
 }

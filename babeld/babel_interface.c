@@ -187,6 +187,7 @@ babel_interface_address_delete (ZAPI_CALLBACK_ARGS)
     send_request(ifc->ifp, NULL, 0);
     send_update(ifc->ifp, 0, NULL, 0);
 
+    connected_free(&ifc);
     return 0;
 }
 
@@ -692,8 +693,7 @@ interface_recalculate(struct interface *ifp)
 
     rc = resize_receive_buffer(mtu);
     if(rc < 0)
-        zlog_warn("couldn't resize "
-                  "receive buffer for interface %s (%d) (%d bytes).\n",
+        zlog_warn("couldn't resize receive buffer for interface %s (%d) (%d bytes).\n",
                   ifp->name, ifp->ifindex, mtu);
 
     memset(&mreq, 0, sizeof(mreq));
@@ -896,8 +896,7 @@ static void
 show_babel_neighbour_sub (struct vty *vty, struct neighbour *neigh)
 {
     vty_out (vty,
-             "Neighbour %s dev %s reach %04x rxcost %d txcost %d "
-             "rtt %s rttcost %d%s.\n",
+             "Neighbour %s dev %s reach %04x rxcost %d txcost %d rtt %s rttcost %d%s.\n",
              format_address(neigh->address),
              neigh->ifp->name,
              neigh->reach,
@@ -988,8 +987,7 @@ show_babel_routes_sub(struct babel_route *route, struct vty *vty,
     }
 
     vty_out (vty,
-            "%s metric %d refmetric %d id %s seqno %d%s age %d "
-            "via %s neigh %s%s%s%s\n",
+            "%s metric %d refmetric %d id %s seqno %d%s age %d via %s neigh %s%s%s%s\n",
             format_prefix(route->src->prefix, route->src->plen),
             route_metric(route), route->refmetric,
             format_eui64(route->src->id),
@@ -1109,6 +1107,7 @@ DEFUN (show_babel_route_addr,
 {
     struct in_addr addr;
     char buf[INET_ADDRSTRLEN + 8];
+    char buf1[INET_ADDRSTRLEN + 8];
     struct route_stream *routes = NULL;
     struct xroute_stream *xroutes = NULL;
     struct prefix prefix;
@@ -1121,7 +1120,8 @@ DEFUN (show_babel_route_addr,
     }
 
     /* Quagga has no convenient prefix constructors. */
-    snprintf(buf, sizeof(buf), "%s/%d", inet_ntoa(addr), 32);
+    snprintf(buf, sizeof(buf), "%s/%d",
+	     inet_ntop(AF_INET, &addr, buf1, sizeof(buf1)), 32);
 
     ret = str2prefix(buf, &prefix);
     if (ret == 0) {

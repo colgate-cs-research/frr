@@ -161,8 +161,9 @@ void zlog_signal(int signo, const char *action, void *siginfo_v,
 	if (!tc)
 		bprintfrr(&fb, "no thread information available\n");
 	else
-		bprintfrr(&fb, "in thread %s scheduled from %s:%d\n",
-			  tc->funcname, tc->schedfrom, tc->schedfrom_line);
+		bprintfrr(&fb, "in thread %s scheduled from %s:%d %s()\n",
+			  tc->xref->funcname, tc->xref->xref.file,
+			  tc->xref->xref.line, tc->xref->xref.func);
 
 	zlog_sigsafe(fb.buf, fb.pos - fb.buf);
 }
@@ -178,6 +179,9 @@ void zlog_backtrace_sigsafe(int priority, void *program_counter)
 	unw_context_t uc;
 	unw_word_t ip, off, sp;
 	Dl_info dlinfo;
+
+	memset(&uc, 0, sizeof(uc));
+	memset(&cursor, 0, sizeof(cursor));
 
 	unw_getcontext(&uc);
 	unw_init_local(&cursor, &uc);
@@ -273,8 +277,7 @@ void zlog_backtrace(int priority)
 	if (size <= 0 || (size_t)size > array_size(array)) {
 		flog_err_sys(
 			EC_LIB_SYSTEM_CALL,
-			"Cannot get backtrace, returned invalid # of frames %d "
-			"(valid range is between 1 and %lu)",
+			"Cannot get backtrace, returned invalid # of frames %d (valid range is between 1 and %lu)",
 			size, (unsigned long)(array_size(array)));
 		return;
 	}
@@ -301,9 +304,9 @@ void zlog_thread_info(int log_level)
 
 	if (tc)
 		zlog(log_level,
-		     "Current thread function %s, scheduled from "
-		     "file %s, line %u",
-		     tc->funcname, tc->schedfrom, tc->schedfrom_line);
+		     "Current thread function %s, scheduled from file %s, line %u in %s()",
+		     tc->xref->funcname, tc->xref->xref.file,
+		     tc->xref->xref.line, tc->xref->xref.func);
 	else
 		zlog(log_level, "Current thread not known/applicable");
 }
@@ -386,6 +389,9 @@ static const struct zebra_desc_table command_types[] = {
 	DESC_ENTRY(ZEBRA_MPLS_LABELS_ADD),
 	DESC_ENTRY(ZEBRA_MPLS_LABELS_DELETE),
 	DESC_ENTRY(ZEBRA_MPLS_LABELS_REPLACE),
+	DESC_ENTRY(ZEBRA_SR_POLICY_SET),
+	DESC_ENTRY(ZEBRA_SR_POLICY_DELETE),
+	DESC_ENTRY(ZEBRA_SR_POLICY_NOTIFY_STATUS),
 	DESC_ENTRY(ZEBRA_IPMR_ROUTE_STATS),
 	DESC_ENTRY(ZEBRA_LABEL_MANAGER_CONNECT),
 	DESC_ENTRY(ZEBRA_LABEL_MANAGER_CONNECT_ASYNC),
@@ -400,6 +406,10 @@ static const struct zebra_desc_table command_types[] = {
 	DESC_ENTRY(ZEBRA_ADVERTISE_SUBNET),
 	DESC_ENTRY(ZEBRA_LOCAL_ES_ADD),
 	DESC_ENTRY(ZEBRA_LOCAL_ES_DEL),
+	DESC_ENTRY(ZEBRA_REMOTE_ES_VTEP_ADD),
+	DESC_ENTRY(ZEBRA_REMOTE_ES_VTEP_DEL),
+	DESC_ENTRY(ZEBRA_LOCAL_ES_EVI_ADD),
+	DESC_ENTRY(ZEBRA_LOCAL_ES_EVI_DEL),
 	DESC_ENTRY(ZEBRA_VNI_ADD),
 	DESC_ENTRY(ZEBRA_VNI_DEL),
 	DESC_ENTRY(ZEBRA_L3VNI_ADD),
@@ -446,7 +456,13 @@ static const struct zebra_desc_table command_types[] = {
 	DESC_ENTRY(ZEBRA_CLIENT_CAPABILITIES),
 	DESC_ENTRY(ZEBRA_OPAQUE_MESSAGE),
 	DESC_ENTRY(ZEBRA_OPAQUE_REGISTER),
-	DESC_ENTRY(ZEBRA_OPAQUE_UNREGISTER)};
+	DESC_ENTRY(ZEBRA_OPAQUE_UNREGISTER),
+	DESC_ENTRY(ZEBRA_NEIGH_DISCOVER),
+	DESC_ENTRY(ZEBRA_NHG_ADD),
+	DESC_ENTRY(ZEBRA_NHG_DEL),
+	DESC_ENTRY(ZEBRA_NHG_NOTIFY_OWNER),
+	DESC_ENTRY(ZEBRA_ROUTE_NOTIFY_REQUEST),
+	DESC_ENTRY(ZEBRA_CLIENT_CLOSE_NOTIFY)};
 #undef DESC_ENTRY
 
 static const struct zebra_desc_table unknown = {0, "unknown", '?'};
@@ -465,8 +481,7 @@ static const struct zebra_desc_table *zroute_lookup(unsigned int zroute)
 	for (i = 0; i < array_size(route_types); i++) {
 		if (zroute == route_types[i].type) {
 			zlog_warn(
-				"internal error: route type table out of order "
-				"while searching for %u, please notify developers",
+				"internal error: route type table out of order while searching for %u, please notify developers",
 				zroute);
 			return &route_types[i];
 		}

@@ -31,6 +31,7 @@
 #include "memory.h"
 #include "vector.h"
 #include "graph.h"
+#include "xref.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -74,6 +75,7 @@ enum cmd_token_type {
 enum { CMD_ATTR_NORMAL,
        CMD_ATTR_DEPRECATED,
        CMD_ATTR_HIDDEN,
+       CMD_ATTR_YANG,
 };
 
 /* Comamand token struct. */
@@ -104,6 +106,7 @@ struct cmd_element {
 		    struct cmd_token *[]);
 
 	const char *name; /* symbol name for debugging */
+	struct xref xref;
 };
 
 /* text for <cr> command */

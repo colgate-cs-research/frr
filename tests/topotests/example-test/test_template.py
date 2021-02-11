@@ -44,6 +44,18 @@ from lib.topolog import logger
 from mininet.topo import Topo
 
 
+#TODO: select markers based on daemons used during test
+# pytest module level markers
+"""
+pytestmark = pytest.mark.bfdd # single marker
+pytestmark = [
+	pytest.mark.bgpd,
+	pytest.mark.ospfd,
+	pytest.mark.ospf6d
+] # multiple markers
+"""
+
+
 class TemplateTopo(Topo):
     "Test topology builder"
 
@@ -82,7 +94,7 @@ def setup_module(mod):
     router_list = tgen.routers()
 
     # For all registred routers, load the zebra configuration file
-    for rname, router in router_list.iteritems():
+    for rname, router in router_list.items():
         router.load_config(
             TopoRouter.RD_ZEBRA,
             # Uncomment next line to load configuration from ./router/zebra.conf

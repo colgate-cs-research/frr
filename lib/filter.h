@@ -32,6 +32,16 @@ extern "C" {
 /* Maximum ACL name length */
 #define ACL_NAMSIZ                128
 
+/** Cisco host wildcard mask. */
+#define CISCO_HOST_WILDCARD_MASK  "0.0.0.0"
+/** Cisco host wildcard binary mask. */
+#define CISCO_BIN_HOST_WILDCARD_MASK INADDR_ANY
+
+/** Cisco any wildcard mask. */
+#define CISCO_ANY_WILDCARD_MASK   "255.255.255.255"
+/** Cisco binary any wildcard mask. */
+#define CISCO_BIN_ANY_WILDCARD_MASK INADDR_NONE
+
 /* Filter direction.  */
 #define FILTER_IN                 0
 #define FILTER_OUT                1
@@ -166,15 +176,64 @@ enum yang_prefix_list_action {
 	YPLA_PERMIT = 1,
 };
 
+struct acl_dup_args {
+	/** Access list type ("ipv4", "ipv6" or "mac"). */
+	const char *ada_type;
+	/** Access list name. */
+	const char *ada_name;
+
+#define ADA_MAX_VALUES 4
+	/** Entry XPath for value. */
+	const char *ada_xpath[ADA_MAX_VALUES];
+	/** Entry value to match. */
+	const char *ada_value[ADA_MAX_VALUES];
+
+	/** Duplicated entry found in list? */
+	bool ada_found;
+
+	/** (Optional) Already existing `dnode`. */
+	const struct lyd_node *ada_entry_dnode;
+};
+
+/**
+ * Check for duplicated entries using the candidate configuration.
+ *
+ * \param vty so we can get the candidate config.
+ * \param ada the arguments to check.
+ */
+bool acl_is_dup(const struct lyd_node *dnode, struct acl_dup_args *ada);
+
+struct plist_dup_args {
+	/** Access list type ("ipv4" or "ipv6"). */
+	const char *pda_type;
+	/** Access list name. */
+	const char *pda_name;
+
+#define PDA_MAX_VALUES 4
+	/** Entry XPath for value. */
+	const char *pda_xpath[PDA_MAX_VALUES];
+	/** Entry value to match. */
+	const char *pda_value[PDA_MAX_VALUES];
+
+	/** Duplicated entry found in list? */
+	bool pda_found;
+
+	/** (Optional) Already existing `dnode`. */
+	const struct lyd_node *pda_entry_dnode;
+};
+
+/**
+ * Check for duplicated entries using the candidate configuration.
+ *
+ * \param vty so we can get the candidate config.
+ * \param pda the arguments to check.
+ */
+bool plist_is_dup(const struct lyd_node *dnode, struct plist_dup_args *pda);
+
 /* filter_cli.c */
 struct lyd_node;
 struct vty;
 
-extern void access_list_legacy_show(struct vty *vty, struct lyd_node *dnode,
-				    bool show_defaults);
-extern void access_list_legacy_remark_show(struct vty *vty,
-					   struct lyd_node *dnode,
-					   bool show_defaults);
 extern void access_list_show(struct vty *vty, struct lyd_node *dnode,
 			     bool show_defaults);
 extern void access_list_remark_show(struct vty *vty, struct lyd_node *dnode,

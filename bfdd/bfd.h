@@ -170,6 +170,7 @@ enum bfd_session_flags {
 	BFD_SESS_FLAG_SHUTDOWN = 1 << 7,	/* disable BGP peer function */
 	BFD_SESS_FLAG_CONFIG = 1 << 8,	/* Session configured with bfd NB API */
 	BFD_SESS_FLAG_CBIT = 1 << 9,	/* CBIT is set */
+	BFD_SESS_FLAG_PASSIVE = 1 << 10, /* Passive mode */
 };
 
 /* BFD session hash keys */
@@ -207,6 +208,10 @@ struct bfd_profile {
 	uint32_t min_rx;
 	/** Administrative state. */
 	bool admin_shutdown;
+	/** Passive mode. */
+	bool passive;
+	/** Minimum expected TTL value. */
+	uint8_t minimum_ttl;
 
 	/** Echo mode (only applies to single hop). */
 	bool echo_mode;
@@ -264,6 +269,7 @@ struct bfd_session {
 	struct bfd_key key;
 	struct peer_label *pl;
 
+	struct bfd_dplane_ctx *bdc;
 	struct sockaddr_any local_address;
 	struct interface *ifp;
 	struct vrf *vrf;
@@ -328,7 +334,8 @@ TAILQ_HEAD(obslist, bfd_session_observer);
 #define BFD_DEFREQUIREDMINRX (300 * 1000) /* microseconds. */
 #define BFD_DEF_REQ_MIN_ECHO (50 * 1000) /* microseconds. */
 #define BFD_DEF_SLOWTX (1000 * 1000) /* microseconds. */
-#define BFD_DEF_MHOP_TTL 5
+/** Minimum multi hop TTL. */
+#define BFD_DEF_MHOP_TTL 254
 #define BFD_PKT_LEN 24 /* Length of control packet */
 #define BFD_TTL_VAL 255
 #define BFD_RCV_TTL_VAL 1
@@ -418,6 +425,10 @@ struct bfd_vrf_global {
 	struct thread *bg_ev[6];
 };
 
+/* Forward declaration of data plane context struct. */
+struct bfd_dplane_ctx;
+TAILQ_HEAD(dplane_queue, bfd_dplane_ctx);
+
 struct bfd_global {
 	int bg_csock;
 	struct thread *bg_csockev;
@@ -429,7 +440,21 @@ struct bfd_global {
 
 	struct zebra_privs_t bfdd_privs;
 
+	/**
+	 * Daemon is exit()ing? Use this to avoid actions that expect a
+	 * running system or to avoid unnecessary operations when quitting.
+	 */
+	bool bg_shutdown;
+
+	/* Distributed BFD items. */
+	bool bg_use_dplane;
+	int bg_dplane_sock;
+	struct thread *bg_dplane_sockev;
+	struct dplane_queue bg_dplaneq;
+
 	/* Debug options. */
+	/* Show distributed BFD debug messages. */
+	bool debug_dplane;
 	/* Show all peer state changes events. */
 	bool debug_peer_event;
 	/*
@@ -601,6 +626,23 @@ void bfd_set_echo(struct bfd_session *bs, bool echo);
  */
 void bfd_set_shutdown(struct bfd_session *bs, bool shutdown);
 
+/**
+ * Set the BFD session passive mode.
+ *
+ * \param bs the BFD session.
+ * \param passive the passive mode.
+ */
+void bfd_set_passive_mode(struct bfd_session *bs, bool passive);
+
+/**
+ * Picks the BFD session configuration from the appropriated source:
+ * if using the default peer configuration prefer profile (if it exists),
+ * otherwise use session.
+ *
+ * \param bs the BFD session.
+ */
+void bfd_session_apply(struct bfd_session *bs);
+
 /* BFD hash data structures interface */
 void bfd_initialize(void);
 void bfd_shutdown(void);
@@ -712,5 +754,57 @@ void bfdd_sessions_disable_vrf(struct vrf *vrf);
 void bfd_session_update_vrf_name(struct bfd_session *bs, struct vrf *vrf);
 
 int ptm_bfd_notify(struct bfd_session *bs, uint8_t notify_state);
+
+/*
+ * dplane.c
+ */
+
+/**
+ * Initialize BFD data plane infrastructure for distributed BFD implementation.
+ *
+ * \param sa socket address.
+ * \param salen socket address structure length.
+ * \param client `true` means connecting socket, `false` listening socket.
+ */
+void bfd_dplane_init(const struct sockaddr *sa, socklen_t salen, bool client);
+
+/**
+ * Attempts to delegate the BFD session liveness detection to hardware.
+ *
+ * \param bs the BFD session data structure.
+ *
+ * \returns
+ * `0` on success and BFD daemon should do nothing or `-1` on failure
+ * and we should fallback to software implementation.
+ */
+int bfd_dplane_add_session(struct bfd_session *bs);
+
+/**
+ * Send new session settings to data plane.
+ *
+ * \param bs the BFD session to update.
+ */
+int bfd_dplane_update_session(const struct bfd_session *bs);
+
+/**
+ * Deletes session from data plane.
+ *
+ * \param bs the BFD session to delete.
+ *
+ * \returns `0` on success otherwise `-1`.
+ */
+int bfd_dplane_delete_session(struct bfd_session *bs);
+
+/**
+ * Asks the data plane for updated counters and update the session data
+ * structure.
+ *
+ * \param bs the BFD session that needs updating.
+ *
+ * \returns `0` on success otherwise `-1` on failure.
+ */
+int bfd_dplane_update_session_counters(struct bfd_session *bs);
+
+void bfd_dplane_show_counters(struct vty *vty);
 
 #endif /* _BFD_H_ */

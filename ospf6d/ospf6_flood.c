@@ -370,7 +370,7 @@ void ospf6_flood_interface(struct ospf6_neighbor *from, struct ospf6_lsa *lsa,
 			continue;
 		}
 
-		if (ospf6->inst_shutdown) {
+		if (oi->area->ospf6->inst_shutdown) {
 			if (is_debug)
 				zlog_debug(
 					"%s: Send LSA %s (age %d) update now",
@@ -452,12 +452,6 @@ void ospf6_flood_area(struct ospf6_neighbor *from, struct ospf6_lsa *lsa,
 		    && oi != OSPF6_INTERFACE(lsa->lsdb->data))
 			continue;
 
-#if 0
-      if (OSPF6_LSA_SCOPE (lsa->header->type) == OSPF6_SCOPE_AS &&
-          ospf6_is_interface_virtual_link (oi))
-        continue;
-#endif /*0*/
-
 		ospf6_flood_interface(from, lsa, oi);
 	}
 }
@@ -486,6 +480,12 @@ static void ospf6_flood_process(struct ospf6_neighbor *from,
 
 void ospf6_flood(struct ospf6_neighbor *from, struct ospf6_lsa *lsa)
 {
+	struct ospf6 *ospf6;
+
+	ospf6 = ospf6_get_by_lsdb(lsa);
+	if (ospf6 == NULL)
+		return;
+
 	ospf6_flood_process(from, lsa, ospf6);
 }
 
@@ -521,12 +521,6 @@ static void ospf6_flood_clear_area(struct ospf6_lsa *lsa, struct ospf6_area *oa)
 		    && oi != OSPF6_INTERFACE(lsa->lsdb->data))
 			continue;
 
-#if 0
-      if (OSPF6_LSA_SCOPE (lsa->header->type) == OSPF6_SCOPE_AS &&
-          ospf6_is_interface_virtual_link (oi))
-        continue;
-#endif /*0*/
-
 		ospf6_flood_clear_interface(lsa, oi);
 	}
 }
@@ -555,6 +549,9 @@ static void ospf6_flood_clear_process(struct ospf6_lsa *lsa,
 
 void ospf6_flood_clear(struct ospf6_lsa *lsa)
 {
+	struct ospf6 *ospf6;
+
+	ospf6 = ospf6_get_by_lsdb(lsa);
 	ospf6_flood_clear_process(lsa, ospf6);
 }
 
@@ -1001,18 +998,22 @@ void ospf6_receive_lsa(struct ospf6_neighbor *from,
 			 * MAXAGEd and not removed.*/
 			if (OSPF6_LSA_IS_MAXAGE(old)
 			    && !OSPF6_LSA_IS_MAXAGE(new)) {
-
-				if (is_debug)
-					zlog_debug(
-						"%s: Current copy of LSA %s is MAXAGE, but new has recent Age.",
-						old->name, __func__);
-
-				ospf6_lsa_purge(old);
 				if (new->header->adv_router
-				    != from->ospf6_if->area->ospf6->router_id)
+				    != from->ospf6_if->area->ospf6->router_id) {
+					if (is_debug)
+						zlog_debug(
+							"%s: Current copy of LSA %s is MAXAGE, but new has recent age, flooding/installing.",
+							old->name, __PRETTY_FUNCTION__);
+					ospf6_lsa_purge(old);
 					ospf6_flood(from, new);
-
-				ospf6_install_lsa(new);
+					ospf6_install_lsa(new);
+				} else {
+					if (is_debug)
+						zlog_debug(
+							"%s: Current copy of self-originated LSA %s is MAXAGE, but new has recent age, ignoring new.",
+							old->name, __PRETTY_FUNCTION__);
+					ospf6_lsa_delete(new);
+				}
 				return;
 			}
 

@@ -1,18 +1,21 @@
 [
   {
-    "inLabel":8100,
+    "inLabel":16100,
     "installed":true,
     "nexthops":[
       {
         "type":"SR (OSPF)",
-        "outLabel":20100,
+        "outLabel":0,
+        "outLabelStack":[
+          0
+        ],
         "distance":150,
         "installed":true,
         "nexthop":"10.0.1.1"
       },
       {
         "type":"SR (OSPF)",
-        "outLabel":20100,
+        "outLabel":0,
         "distance":150,
         "installed":true,
         "nexthop":"10.0.0.1"
@@ -20,12 +23,15 @@
     ]
   },
   {
-    "inLabel":8300,
+    "inLabel":16300,
     "installed":true,
     "nexthops":[
       {
         "type":"SR (OSPF)",
         "outLabel":3,
+        "outLabelStack":[
+          3
+        ],
         "distance":150,
         "installed":true,
         "nexthop":"10.0.3.1"
@@ -33,12 +39,15 @@
     ]
   },
   {
-    "inLabel":8400,
+    "inLabel":16400,
     "installed":true,
     "nexthops":[
       {
         "type":"SR (OSPF)",
         "outLabel":10400,
+        "outLabelStack":[
+          10400
+        ],
         "distance":150,
         "installed":true,
         "nexthop":"10.0.4.1"
@@ -52,6 +61,9 @@
       {
         "type":"SR (OSPF)",
         "outLabel":3,
+        "outLabelStack":[
+          3
+        ],
         "distance":150,
         "installed":true,
         "nexthop":"10.0.4.1"
@@ -65,6 +77,9 @@
       {
         "type":"SR (OSPF)",
         "outLabel":3,
+        "outLabelStack":[
+          3
+        ],
         "distance":150,
         "installed":true,
         "nexthop":"10.0.4.1"
@@ -78,6 +93,9 @@
       {
         "type":"SR (OSPF)",
         "outLabel":3,
+        "outLabelStack":[
+          3
+        ],
         "distance":150,
         "installed":true,
         "nexthop":"10.0.0.1"
@@ -91,6 +109,9 @@
       {
         "type":"SR (OSPF)",
         "outLabel":3,
+        "outLabelStack":[
+          3
+        ],
         "distance":150,
         "installed":true,
         "nexthop":"10.0.0.1"
@@ -104,6 +125,9 @@
       {
         "type":"SR (OSPF)",
         "outLabel":3,
+        "outLabelStack":[
+          3
+        ],
         "distance":150,
         "installed":true,
         "nexthop":"10.0.1.1"
@@ -117,6 +141,9 @@
       {
         "type":"SR (OSPF)",
         "outLabel":3,
+        "outLabelStack":[
+          3
+        ],
         "distance":150,
         "installed":true,
         "nexthop":"10.0.1.1"

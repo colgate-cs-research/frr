@@ -34,7 +34,7 @@ extern "C" {
 #endif
 
 /* Maximum XPath length. */
-#define XPATH_MAXLEN 512
+#define XPATH_MAXLEN 1024
 
 /* Maximum list key length. */
 #define LIST_MAXKEYS 8
@@ -48,6 +48,8 @@ extern "C" {
 struct yang_module_embed {
 	struct yang_module_embed *next;
 	const char *mod_name, *mod_rev;
+	const char *sub_mod_name;
+	const char *sub_mod_rev;
 	const char *data;
 	LYS_INFORMAT format;
 };
@@ -61,6 +63,7 @@ struct yang_module {
 #endif
 #ifdef HAVE_SYSREPO
 	sr_subscription_ctx_t *sr_subscription;
+	struct thread *sr_thread;
 #endif
 };
 RB_HEAD(yang_modules, yang_module);
@@ -99,9 +102,6 @@ enum yang_iter_flags {
 
 	/* Filter implicitely created nodes. */
 	YANG_ITER_FILTER_IMPLICIT = (1<<3),
-
-	/* Allow iteration over augmentations. */
-	YANG_ITER_ALLOW_AUGMENTATIONS = (1<<4),
 };
 
 /* Callback used by the yang_snodes_iterate_*() family of functions. */
@@ -165,6 +165,9 @@ extern void yang_module_embed(struct yang_module_embed *embed);
  * snode
  *    YANG schema node to operate on.
  *
+ * module
+ *    When set, iterate over all nodes of the specified module only.
+ *
  * cb
  *    Function to call with each schema node.
  *
@@ -178,14 +181,16 @@ extern void yang_module_embed(struct yang_module_embed *embed);
  *    The return value of the last called callback.
  */
 extern int yang_snodes_iterate_subtree(const struct lys_node *snode,
+				       const struct lys_module *module,
 				       yang_iterate_cb cb, uint16_t flags,
 				       void *arg);
 
 /*
- * Iterate over all libyang schema nodes from the given YANG module.
+ * Iterate over all libyang schema nodes from all loeaded modules of from the
+ * given YANG module.
  *
  * module
- *    YANG module to operate on.
+ *    When set, iterate over all nodes of the specified module only.
  *
  * cb
  *    Function to call with each schema node.
@@ -199,27 +204,8 @@ extern int yang_snodes_iterate_subtree(const struct lys_node *snode,
  * Returns:
  *    The return value of the last called callback.
  */
-extern int yang_snodes_iterate_module(const struct lys_module *module,
-				      yang_iterate_cb cb, uint16_t flags,
-				      void *arg);
-
-/*
- * Iterate over all libyang schema nodes from all loaded YANG modules.
- *
- * cb
- *    Function to call with each schema node.
- *
- * flags
- *    YANG_ITER_* flags to control how the iteration is performed.
- *
- * arg
- *    Arbitrary argument passed as the second parameter in each call to 'cb'.
- *
- * Returns:
- *    The return value of the last called callback.
- */
-extern int yang_snodes_iterate_all(yang_iterate_cb cb, uint16_t flags,
-				   void *arg);
+extern int yang_snodes_iterate(const struct lys_module *module,
+			       yang_iterate_cb cb, uint16_t flags, void *arg);
 
 /*
  * Build schema path or data path of the schema node.
@@ -550,6 +536,62 @@ extern void yang_init(bool embedded_modules);
  * is exiting.
  */
 extern void yang_terminate(void);
+
+/*
+ * API to return the parent dnode having a given schema-node name
+ * Use case: One has to access the parent dnode's private pointer
+ * for a given child node.
+ * For that there is a need to find parent dnode first.
+ *
+ * dnode The starting node to work on
+ *
+ * name  The name of container/list schema-node
+ *
+ * Returns The dnode matched with the given name
+ */
+extern const struct lyd_node *
+yang_dnode_get_parent(const struct lyd_node *dnode, const char *name);
+
+
+/*
+ * In some cases there is a need to auto delete the parent nodes
+ * if the given node is last in the list.
+ * It tries to delete all the parents in a given tree in a given module.
+ * The use case is with static routes and route maps
+ * example : ip route 1.1.1.1/32 ens33
+ *           ip route 1.1.1.1/32 ens34
+ * After this no ip route 1.1.1.1/32 ens34 came, now staticd
+ * has to find out upto which level it has to delete the dnodes.
+ * For this case it has to send delete nexthop
+ * After this no ip route 1.1.1.1/32 ens33 came, now staticd has to
+ * clear nexthop, path and route nodes.
+ * The same scheme is required for routemaps also
+ * dnode The starting node to work on
+ *
+ * Returns The final parent node selected for deletion
+ */
+extern const struct lyd_node *
+yang_get_subtree_with_no_sibling(const struct lyd_node *dnode);
+
+/* To get the relative position of a node in list */
+extern uint32_t yang_get_list_pos(const struct lyd_node *node);
+
+/* To get the number of elements in a list
+ *
+ * dnode : The head of list
+ * Returns : The number of dnodes present in the list
+ */
+extern uint32_t yang_get_list_elements_count(const struct lyd_node *node);
+
+
+/* To get the immediate child of a dnode */
+const struct lyd_node *yang_dnode_get_child(const struct lyd_node *dnode);
+
+/* API to check if the given node is last node in the list */
+bool yang_is_last_list_dnode(const struct lyd_node *dnode);
+
+/* API to check if the given node is last node in the data tree level */
+bool yang_is_last_level_dnode(const struct lyd_node *dnode);
 
 #ifdef __cplusplus
 }

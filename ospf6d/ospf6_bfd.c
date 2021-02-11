@@ -55,12 +55,13 @@ void ospf6_bfd_info_free(void **bfd_info)
 /*
  * ospf6_bfd_show_info - Show BFD info structure
  */
-void ospf6_bfd_show_info(struct vty *vty, void *bfd_info, int param_only)
+void ospf6_bfd_show_info(struct vty *vty, void *bfd_info, int param_only,
+			 json_object *json_obj, bool use_json)
 {
 	if (param_only)
-		bfd_show_param(vty, bfd_info, 1, 0, 0, NULL);
+		bfd_show_param(vty, bfd_info, 1, 0, use_json, json_obj);
 	else
-		bfd_show_info(vty, bfd_info, 0, 1, 0, NULL);
+		bfd_show_info(vty, bfd_info, 0, 1, use_json, json_obj);
 }
 
 /*
@@ -89,8 +90,8 @@ void ospf6_bfd_reg_dereg_nbr(struct ospf6_neighbor *on, int command)
 	cbit = CHECK_FLAG(bfd_info->flags, BFD_FLAG_BFD_CBIT_ON);
 
 	bfd_peer_sendmsg(zclient, bfd_info, AF_INET6, &on->linklocal_addr,
-			 on->ospf6_if->linklocal_addr, ifp->name, 0, 0,
-			 cbit, command, 0, VRF_DEFAULT);
+			 on->ospf6_if->linklocal_addr, ifp->name, 0, 0, cbit,
+			 command, 0, ifp->vrf_id);
 
 	if (command == ZEBRA_BFD_DEST_DEREGISTER)
 		bfd_info_free((struct bfd_info **)&on->bfd_info);
@@ -143,7 +144,7 @@ static void ospf6_bfd_reg_dereg_all_nbr(struct ospf6_interface *oi, int command)
  */
 static int ospf6_bfd_nbr_replay(ZAPI_CALLBACK_ARGS)
 {
-	struct vrf *vrf = vrf_lookup_by_id(VRF_DEFAULT);
+	struct vrf *vrf = vrf_lookup_by_id(vrf_id);
 	struct listnode *node;
 	struct interface *ifp;
 	struct ospf6_interface *oi;
@@ -204,12 +205,9 @@ static int ospf6_bfd_interface_dest_update(ZAPI_CALLBACK_ARGS)
 	if ((ifp == NULL) || (dp.family != AF_INET6))
 		return 0;
 
-	if (IS_OSPF6_DEBUG_ZEBRA(RECV)) {
-		char buf[PREFIX2STR_BUFFER];
-		prefix2str(&dp, buf, sizeof(buf));
-		zlog_debug("Zebra: interface %s bfd destination %s %s",
-			   ifp->name, buf, bfd_get_status_str(status));
-	}
+	if (IS_OSPF6_DEBUG_ZEBRA(RECV))
+		zlog_debug("Zebra: interface %s bfd destination %pFX %s",
+			   ifp->name, &dp, bfd_get_status_str(status));
 
 
 	oi = (struct ospf6_interface *)ifp->info;
@@ -308,7 +306,7 @@ static void ospf6_bfd_if_param_set(struct ospf6_interface *oi, uint32_t min_rx,
 	int command = 0;
 
 	bfd_set_param((struct bfd_info **)&(oi->bfd_info), min_rx, min_tx,
-		      detect_mult, defaults, &command);
+		      detect_mult, NULL, defaults, &command);
 	if (command)
 		ospf6_bfd_reg_dereg_all_nbr(oi, command);
 }

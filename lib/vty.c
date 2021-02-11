@@ -141,8 +141,8 @@ bool vty_set_include(struct vty *vty, const char *regexp)
 			  REG_EXTENDED | REG_NEWLINE | REG_NOSUB);
 	if (errcode) {
 		ret = false;
-		regerror(ret, &vty->include, errbuf, sizeof(errbuf));
-		vty_out(vty, "%% Regex compilation error: %s", errbuf);
+		regerror(errcode, &vty->include, errbuf, sizeof(errbuf));
+		vty_out(vty, "%% Regex compilation error: %s\n", errbuf);
 	} else {
 		vty->filter = true;
 	}
@@ -358,15 +358,6 @@ void vty_hello(struct vty *vty)
 			vty_out(vty, "MOTD file not found\n");
 	} else if (host.motd)
 		vty_out(vty, "%s", host.motd);
-
-#if CONFDATE > 20200901
-	CPP_NOTICE("Please remove solaris code from system as it is deprecated");
-#endif
-#ifdef SUNOS_5
-	zlog_warn("If you are using FRR on Solaris, the FRR developers would love to hear from you\n");
-	zlog_warn("Please send email to dev@lists.frrouting.org about this message\n");
-	zlog_warn("We are considering deprecating Solaris and want to find users of Solaris systems\n");
-#endif
 }
 
 /* Put out prompt and wait input from user. */
@@ -404,16 +395,6 @@ static void vty_do_window_size(struct vty *vty)
 	unsigned char cmd[] = {IAC, DO, TELOPT_NAWS, '\0'};
 	vty_out(vty, "%s", cmd);
 }
-
-#if 0  /* Currently not used. */
-/* Make don't use lflow vty interface. */
-static void
-vty_dont_lflow_ahead (struct vty *vty)
-{
-  unsigned char cmd[] = { IAC, DONT, TELOPT_LFLOW, '\0' };
-  vty_out (vty, "%s", cmd);
-}
-#endif /* 0 */
 
 /* Authentication of vty */
 static void vty_auth(struct vty *vty, char *buf)
@@ -1099,11 +1080,6 @@ static void vty_describe_command(struct vty *vty)
 
 				vector_free(varcomps);
 			}
-#if 0
-        vty_out (vty, "  %-*s %s\n", width
-                 desc->cmd[0] == '.' ? desc->cmd + 1 : desc->cmd,
-                 desc->str ? desc->str : "");
-#endif /* 0 */
 		}
 
 	if ((token = token_cr)) {
@@ -1244,8 +1220,7 @@ static int vty_telnet_option(struct vty *vty, unsigned char *buf, int nbytes)
 			if (vty->sb_len != TELNET_NAWS_SB_LEN)
 				flog_err(
 					EC_LIB_SYSTEM_CALL,
-					"RFC 1073 violation detected: telnet NAWS option "
-					"should send %d characters, but we received %lu",
+					"RFC 1073 violation detected: telnet NAWS option should send %d characters, but we received %lu",
 					TELNET_NAWS_SB_LEN,
 					(unsigned long)vty->sb_len);
 			else if (sizeof(vty->sb_buf) < TELNET_NAWS_SB_LEN)
@@ -1261,8 +1236,7 @@ static int vty_telnet_option(struct vty *vty, unsigned char *buf, int nbytes)
 					       | vty->sb_buf[4]);
 #ifdef TELNET_OPTION_DEBUG
 				vty_out(vty,
-					"TELNET NAWS window size negotiation completed: "
-					"width %d, height %d\n",
+					"TELNET NAWS window size negotiation completed: width %d, height %d\n",
 					vty->width, vty->height);
 #endif
 			}
@@ -1407,12 +1381,6 @@ static int vty_read(struct thread *thread)
 			case 'Q':
 				vty_buffer_reset(vty);
 				break;
-#if 0 /* More line does not work for "show ip bgp".  */
-            case '\n':
-            case '\r':
-              vty->status = VTY_MORELINE;
-              break;
-#endif
 			default:
 				break;
 			}
@@ -1821,7 +1789,12 @@ static int vty_accept(struct thread *thread)
 	set_nonblocking(vty_sock);
 	set_cloexec(vty_sock);
 
-	sockunion2hostprefix(&su, &p);
+	if (!sockunion2hostprefix(&su, &p)) {
+		close(vty_sock);
+		zlog_info("Vty unable to convert prefix from sockunion %s",
+			  sockunion2str(&su, buf, SU_ADDRSTRLEN));
+		return -1;
+	}
 
 	/* VTY's accesslist apply. */
 	if (p.family == AF_INET && vty_accesslist_name) {
@@ -2632,6 +2605,9 @@ void vty_config_exit(struct vty *vty)
 int vty_config_node_exit(struct vty *vty)
 {
 	vty->xpath_index = 0;
+
+	/* Perform pending commit if any. */
+	nb_cli_pending_commit_check(vty);
 
 	/* Check if there's a pending confirmed commit. */
 	if (vty->t_confirmed_commit_timeout) {

@@ -43,7 +43,7 @@ enum { IFLA_VRF_UNSPEC, IFLA_VRF_TABLE, __IFLA_VRF_MAX };
 #endif
 
 #define VRF_NAMSIZ      36
-#define NS_NAMSIZ       16
+#define NS_NAMSIZ 36
 
 /*
  * The command strings
@@ -114,6 +114,7 @@ extern struct vrf_name_head vrfs_by_name;
 extern struct vrf *vrf_lookup_by_id(vrf_id_t);
 extern struct vrf *vrf_lookup_by_name(const char *);
 extern struct vrf *vrf_get(vrf_id_t, const char *);
+extern struct vrf *vrf_update(vrf_id_t new_vrf_id, const char *name);
 extern const char *vrf_id_to_name(vrf_id_t vrf_id);
 extern vrf_id_t vrf_name_to_id(const char *);
 
@@ -165,6 +166,20 @@ static inline void vrf_set_user_cfged(struct vrf *vrf)
 static inline void vrf_reset_user_cfged(struct vrf *vrf)
 {
 	UNSET_FLAG(vrf->status, VRF_CONFIGURED);
+}
+
+static inline uint32_t vrf_interface_count(struct vrf *vrf)
+{
+	uint32_t count = 0;
+	struct interface *ifp;
+
+	RB_FOREACH (ifp, if_name_head, &vrf->ifaces_by_name) {
+		/* skip the l3mdev */
+		if (strncmp(ifp->name, vrf->name, VRF_NAMSIZ) == 0)
+			continue;
+		count++;
+	}
+	return count;
 }
 
 /*
@@ -262,12 +277,8 @@ extern int vrf_getaddrinfo(const char *node, const char *service,
 
 extern int vrf_ioctl(vrf_id_t vrf_id, int d, unsigned long request, char *args);
 
-/* function called by macro VRF_DEFAULT
- * to get the default VRF_ID
- */
-extern vrf_id_t vrf_get_default_id(void);
 /* The default VRF ID */
-#define VRF_DEFAULT vrf_get_default_id()
+#define VRF_DEFAULT 0
 
 extern void vrf_set_default_name(const char *default_name, bool force);
 extern const char *vrf_get_default_name(void);

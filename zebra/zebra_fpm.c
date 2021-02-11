@@ -70,7 +70,7 @@ DEFINE_MTYPE_STATIC(ZEBRA, FPM_MAC_INFO, "FPM_MAC_INFO");
 #define ZFPM_STATS_IVL_SECS        10
 #define FPM_MAX_MAC_MSG_LEN 512
 
-static void zfpm_iterate_rmac_table(struct hash_bucket *backet, void *args);
+static void zfpm_iterate_rmac_table(struct hash_bucket *bucket, void *args);
 
 /*
  * Structure that holds state for iterating over all route_node
@@ -273,6 +273,11 @@ struct zfpm_glob {
 	 * If non-zero, the last time when statistics were cleared.
 	 */
 	time_t last_stats_clear_time;
+
+	/*
+	 * Flag to track the MAC dump status to FPM
+	 */
+	bool fpm_mac_dump_done;
 };
 
 static struct zfpm_glob zfpm_glob_space;
@@ -489,7 +494,7 @@ static inline void zfpm_write_on(void)
  */
 static inline void zfpm_read_off(void)
 {
-	THREAD_READ_OFF(zfpm_g->t_read);
+	thread_cancel(&zfpm_g->t_read);
 }
 
 /*
@@ -497,12 +502,12 @@ static inline void zfpm_read_off(void)
  */
 static inline void zfpm_write_off(void)
 {
-	THREAD_WRITE_OFF(zfpm_g->t_write);
+	thread_cancel(&zfpm_g->t_write);
 }
 
 static inline void zfpm_connect_off(void)
 {
-	THREAD_TIMER_OFF(zfpm_g->t_connect);
+	thread_cancel(&zfpm_g->t_connect);
 }
 
 /*
@@ -517,8 +522,6 @@ static int zfpm_conn_up_thread_cb(struct thread *thread)
 	struct zfpm_rnodes_iter *iter;
 	rib_dest_t *dest;
 
-	zfpm_g->t_conn_up = NULL;
-
 	iter = &zfpm_g->t_conn_up_state.iter;
 
 	if (zfpm_g->state != ZFPM_STATE_ESTABLISHED) {
@@ -528,8 +531,13 @@ static int zfpm_conn_up_thread_cb(struct thread *thread)
 		goto done;
 	}
 
-	/* Enqueue FPM updates for all the RMAC entries */
-	hash_iterate(zrouter.l3vni_table, zfpm_iterate_rmac_table, NULL);
+	if (!zfpm_g->fpm_mac_dump_done) {
+		/* Enqueue FPM updates for all the RMAC entries */
+		hash_iterate(zrouter.l3vni_table, zfpm_iterate_rmac_table,
+			     NULL);
+		/* mark dump done so that its not repeated after yield */
+		zfpm_g->fpm_mac_dump_done = true;
+	}
 
 	while ((rnode = zfpm_rnodes_iter_next(iter))) {
 		dest = rib_dest_from_rnode(rnode);
@@ -547,7 +555,6 @@ static int zfpm_conn_up_thread_cb(struct thread *thread)
 
 		zfpm_g->stats.t_conn_up_yields++;
 		zfpm_rnodes_iter_pause(iter);
-		zfpm_g->t_conn_up = NULL;
 		thread_add_timer_msec(zfpm_g->master, zfpm_conn_up_thread_cb,
 				      NULL, 0, &zfpm_g->t_conn_up);
 		return 0;
@@ -575,12 +582,13 @@ static void zfpm_connection_up(const char *detail)
 	/*
 	 * Start thread to push existing routes to the FPM.
 	 */
-	assert(!zfpm_g->t_conn_up);
+	thread_cancel(&zfpm_g->t_conn_up);
 
 	zfpm_rnodes_iter_init(&zfpm_g->t_conn_up_state.iter);
+	zfpm_g->fpm_mac_dump_done = false;
 
 	zfpm_debug("Starting conn_up thread");
-	zfpm_g->t_conn_up = NULL;
+
 	thread_add_timer_msec(zfpm_g->master, zfpm_conn_up_thread_cb, NULL, 0,
 			      &zfpm_g->t_conn_up);
 	zfpm_g->stats.t_conn_up_starts++;
@@ -1437,7 +1445,6 @@ static inline int zfpm_conn_is_up(void)
 static int zfpm_trigger_update(struct route_node *rn, const char *reason)
 {
 	rib_dest_t *dest;
-	char buf[PREFIX_STRLEN];
 
 	/*
 	 * Ignore if the connection is down. We will update the FPM about
@@ -1454,8 +1461,8 @@ static int zfpm_trigger_update(struct route_node *rn, const char *reason)
 	}
 
 	if (reason) {
-		zfpm_debug("%s triggering update to FPM - Reason: %s",
-			   prefix2str(&rn->p, buf, sizeof(buf)), reason);
+		zfpm_debug("%pFX triggering update to FPM - Reason: %s", &rn->p,
+			   reason);
 	}
 
 	SET_FLAG(dest->flags, RIB_DEST_UPDATE_FPM);
@@ -1628,10 +1635,10 @@ static int zfpm_trigger_rmac_update(zebra_mac_t *rmac, zebra_l3vni_t *zl3vni,
  * Iterate over all the RMAC entries for the given L3VNI
  * and enqueue the RMAC for FPM processing.
  */
-static void zfpm_trigger_rmac_update_wrapper(struct hash_bucket *backet,
+static void zfpm_trigger_rmac_update_wrapper(struct hash_bucket *bucket,
 					     void *args)
 {
-	zebra_mac_t *zrmac = (zebra_mac_t *)backet->data;
+	zebra_mac_t *zrmac = (zebra_mac_t *)bucket->data;
 	zebra_l3vni_t *zl3vni = (zebra_l3vni_t *)args;
 
 	zfpm_trigger_rmac_update(zrmac, zl3vni, false, "RMAC added");
@@ -1642,9 +1649,9 @@ static void zfpm_trigger_rmac_update_wrapper(struct hash_bucket *backet,
  * This function iterates over all the L3VNIs to trigger
  * FPM updates for RMACs currently available.
  */
-static void zfpm_iterate_rmac_table(struct hash_bucket *backet, void *args)
+static void zfpm_iterate_rmac_table(struct hash_bucket *bucket, void *args)
 {
-	zebra_l3vni_t *zl3vni = (zebra_l3vni_t *)backet->data;
+	zebra_l3vni_t *zl3vni = (zebra_l3vni_t *)bucket->data;
 
 	hash_iterate(zl3vni->rmac_table, zfpm_trigger_rmac_update_wrapper,
 		     (void *)zl3vni);
@@ -1688,7 +1695,7 @@ static void zfpm_stop_stats_timer(void)
 		return;
 
 	zfpm_debug("Stopping existing stats timer");
-	THREAD_TIMER_OFF(zfpm_g->t_stats);
+	thread_cancel(&zfpm_g->t_stats);
 }
 
 /*
@@ -1908,8 +1915,7 @@ static inline void zfpm_init_message_format(const char *format)
 			return;
 		}
 		flog_warn(EC_ZEBRA_PROTOBUF_NOT_AVAILABLE,
-			  "FPM protobuf message format is deprecated and scheduled to be removed. "
-			  "Please convert to using netlink format or contact dev@lists.frrouting.org with your use case.");
+			  "FPM protobuf message format is deprecated and scheduled to be removed. Please convert to using netlink format or contact dev@lists.frrouting.org with your use case.");
 		zfpm_g->message_format = ZFPM_MSG_FORMAT_PROTOBUF;
 		return;
 	}
@@ -1935,7 +1941,7 @@ static int fpm_remote_srv_write(struct vty *vty)
 	if ((zfpm_g->fpm_server != FPM_DEFAULT_IP
 	     && zfpm_g->fpm_server != INADDR_ANY)
 	    || (zfpm_g->fpm_port != FPM_DEFAULT_PORT && zfpm_g->fpm_port != 0))
-		vty_out(vty, "fpm connection ip %s port %d\n", inet_ntoa(in),
+		vty_out(vty, "fpm connection ip %pI4 port %d\n", &in,
 			zfpm_g->fpm_port);
 
 	return 0;

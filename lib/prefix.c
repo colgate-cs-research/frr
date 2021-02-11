@@ -22,6 +22,7 @@
 #include <zebra.h>
 
 #include "prefix.h"
+#include "ipaddr.h"
 #include "vty.h"
 #include "sockunion.h"
 #include "memory.h"
@@ -29,6 +30,7 @@
 #include "jhash.h"
 #include "lib_errors.h"
 #include "printfrr.h"
+#include "vxlan.h"
 
 DEFINE_MTYPE_STATIC(LIB, PREFIX, "Prefix")
 DEFINE_MTYPE_STATIC(LIB, PREFIX_FLOWSPEC, "Prefix Flowspec")
@@ -75,10 +77,10 @@ bool is_mcast_mac(const struct ethaddr *mac)
 	return false;
 }
 
-unsigned int prefix_bit(const uint8_t *prefix, const uint16_t prefixlen)
+unsigned int prefix_bit(const uint8_t *prefix, const uint16_t bit_index)
 {
-	unsigned int offset = prefixlen / 8;
-	unsigned int shift = 7 - (prefixlen % 8);
+	unsigned int offset = bit_index / 8;
+	unsigned int shift = 7 - (bit_index % 8);
 
 	return (prefix[offset] >> shift) & 1;
 }
@@ -187,6 +189,10 @@ int prefix_match(const struct prefix *n, const struct prefix *p)
 
 	if (n->family == AF_FLOWSPEC) {
 		/* prefixlen is unused. look at fs prefix len */
+		if (n->u.prefix_flowspec.family !=
+		    p->u.prefix_flowspec.family)
+			return 0;
+
 		if (n->u.prefix_flowspec.prefixlen >
 		    p->u.prefix_flowspec.prefixlen)
 			return 0;
@@ -324,6 +330,8 @@ void prefix_copy(union prefixptr udest, union prefixconstptr usrc)
 		len = src->u.prefix_flowspec.prefixlen;
 		dest->u.prefix_flowspec.prefixlen =
 			src->u.prefix_flowspec.prefixlen;
+		dest->u.prefix_flowspec.family =
+			src->u.prefix_flowspec.family;
 		dest->family = src->family;
 		temp = XCALLOC(MTYPE_PREFIX_FLOWSPEC, len);
 		dest->u.prefix_flowspec.ptr = (uintptr_t)temp;
@@ -373,6 +381,9 @@ int prefix_same(union prefixconstptr up1, union prefixconstptr up2)
 				    sizeof(struct evpn_addr)))
 				return 1;
 		if (p1->family == AF_FLOWSPEC) {
+			if (p1->u.prefix_flowspec.family !=
+			    p2->u.prefix_flowspec.family)
+				return 0;
 			if (p1->u.prefix_flowspec.prefixlen !=
 			    p2->u.prefix_flowspec.prefixlen)
 				return 0;
@@ -413,6 +424,10 @@ int prefix_cmp(union prefixconstptr up1, union prefixconstptr up2)
 	if (p1->family == AF_FLOWSPEC) {
 		pp1 = (const uint8_t *)p1->u.prefix_flowspec.ptr;
 		pp2 = (const uint8_t *)p2->u.prefix_flowspec.ptr;
+
+		if (p1->u.prefix_flowspec.family !=
+		    p2->u.prefix_flowspec.family)
+			return 1;
 
 		if (p1->u.prefix_flowspec.prefixlen !=
 		    p2->u.prefix_flowspec.prefixlen)
@@ -895,7 +910,17 @@ int str2prefix(const char *str, struct prefix *p)
 static const char *prefixevpn_ead2str(const struct prefix_evpn *p, char *str,
 				      int size)
 {
-	snprintf(str, size, "Unsupported EVPN prefix");
+	uint8_t family;
+	char buf[ESI_STR_LEN];
+	char buf1[INET6_ADDRSTRLEN];
+
+	family = IS_IPADDR_V4(&p->prefix.ead_addr.ip) ? AF_INET : AF_INET6;
+	snprintf(str, size, "[%d]:[%u]:[%s]:[%d]:[%s]", p->prefix.route_type,
+		 p->prefix.ead_addr.eth_tag,
+		 esi_to_str(&p->prefix.ead_addr.esi, buf, sizeof(buf)),
+		 (family == AF_INET) ? IPV4_MAX_BITLEN : IPV6_MAX_BITLEN,
+		 inet_ntop(family, &p->prefix.ead_addr.ip.ipaddr_v4, buf1,
+			   sizeof(buf1)));
 	return str;
 }
 
@@ -903,27 +928,24 @@ static const char *prefixevpn_macip2str(const struct prefix_evpn *p, char *str,
 					int size)
 {
 	uint8_t family;
-	char buf[PREFIX2STR_BUFFER];
-	char buf2[ETHER_ADDR_STRLEN];
+	char buf1[ETHER_ADDR_STRLEN];
+	char buf2[PREFIX2STR_BUFFER];
 
 	if (is_evpn_prefix_ipaddr_none(p))
-		snprintf(str, size, "[%d]:[%s]/%d",
-			 p->prefix.route_type,
-			 prefix_mac2str(&p->prefix.macip_addr.mac,
-					buf2, sizeof(buf2)),
-			 p->prefixlen);
+		snprintf(str, size, "[%d]:[%d]:[%d]:[%s]", p->prefix.route_type,
+			 p->prefix.macip_addr.eth_tag, 8 * ETH_ALEN,
+			 prefix_mac2str(&p->prefix.macip_addr.mac, buf1,
+					sizeof(buf1)));
 	else {
-		family = is_evpn_prefix_ipaddr_v4(p)
-				 ? AF_INET
-				 : AF_INET6;
-		snprintf(str, size, "[%d]:[%s]:[%s]/%d",
-			 p->prefix.route_type,
-			 prefix_mac2str(&p->prefix.macip_addr.mac,
-					buf2, sizeof(buf2)),
-			 inet_ntop(family,
-				   &p->prefix.macip_addr.ip.ip.addr,
-				   buf, PREFIX2STR_BUFFER),
-			 p->prefixlen);
+		family = is_evpn_prefix_ipaddr_v4(p) ? AF_INET : AF_INET6;
+		snprintf(str, size, "[%d]:[%d]:[%d]:[%s]:[%d]:[%s]",
+			 p->prefix.route_type, p->prefix.macip_addr.eth_tag,
+			 8 * ETH_ALEN,
+			 prefix_mac2str(&p->prefix.macip_addr.mac, buf1,
+					sizeof(buf1)),
+			 family == AF_INET ? IPV4_MAX_BITLEN : IPV6_MAX_BITLEN,
+			 inet_ntop(family, &p->prefix.macip_addr.ip.ip.addr,
+				   buf2, PREFIX2STR_BUFFER));
 	}
 	return str;
 }
@@ -932,28 +954,32 @@ static const char *prefixevpn_imet2str(const struct prefix_evpn *p, char *str,
 				       int size)
 {
 	uint8_t family;
-	char buf[PREFIX2STR_BUFFER];
+	char buf[INET6_ADDRSTRLEN];
 
-	family = is_evpn_prefix_ipaddr_v4(p)
-			 ? AF_INET
-			 : AF_INET6;
-	snprintf(str, size, "[%d]:[%s]/%d", p->prefix.route_type,
-		 inet_ntop(family,
-			   &p->prefix.imet_addr.ip.ip.addr, buf,
-			   PREFIX2STR_BUFFER),
-		 p->prefixlen);
+	family = IS_IPADDR_V4(&p->prefix.imet_addr.ip) ? AF_INET : AF_INET6;
+	snprintf(str, size, "[%d]:[%d]:[%d]:[%s]", p->prefix.route_type,
+		 p->prefix.imet_addr.eth_tag,
+		 (family == AF_INET) ? IPV4_MAX_BITLEN : IPV6_MAX_BITLEN,
+		 inet_ntop(family, &p->prefix.imet_addr.ip.ipaddr_v4, buf,
+			   sizeof(buf)));
+
 	return str;
 }
 
 static const char *prefixevpn_es2str(const struct prefix_evpn *p, char *str,
 				     int size)
 {
+	uint8_t family;
 	char buf[ESI_STR_LEN];
+	char buf1[INET6_ADDRSTRLEN];
 
-	snprintf(str, size, "[%d]:[%s]:[%s]/%d", p->prefix.route_type,
+	family = IS_IPADDR_V4(&p->prefix.es_addr.ip) ? AF_INET : AF_INET6;
+	snprintf(str, size, "[%d]:[%s]:[%d]:[%s]", p->prefix.route_type,
 		 esi_to_str(&p->prefix.es_addr.esi, buf, sizeof(buf)),
-		 inet_ntoa(p->prefix.es_addr.ip.ipaddr_v4),
-		 p->prefixlen);
+		 (family == AF_INET) ? IPV4_MAX_BITLEN : IPV6_MAX_BITLEN,
+		 inet_ntop(family, &p->prefix.es_addr.ip.ipaddr_v4, buf1,
+			   sizeof(buf1)));
+
 	return str;
 }
 
@@ -961,19 +987,14 @@ static const char *prefixevpn_prefix2str(const struct prefix_evpn *p, char *str,
 					 int size)
 {
 	uint8_t family;
-	char buf[PREFIX2STR_BUFFER];
+	char buf[INET6_ADDRSTRLEN];
 
-	family = is_evpn_prefix_ipaddr_v4(p)
-			 ? AF_INET
-			 : AF_INET6;
-	snprintf(str, size, "[%d]:[%u]:[%s/%d]/%d",
-		 p->prefix.route_type,
+	family = IS_IPADDR_V4(&p->prefix.prefix_addr.ip) ? AF_INET : AF_INET6;
+	snprintf(str, size, "[%d]:[%d]:[%d]:[%s]", p->prefix.route_type,
 		 p->prefix.prefix_addr.eth_tag,
-		 inet_ntop(family,
-			   &p->prefix.prefix_addr.ip.ip.addr, buf,
-			   PREFIX2STR_BUFFER),
 		 p->prefix.prefix_addr.ip_prefix_length,
-		 p->prefixlen);
+		 inet_ntop(family, &p->prefix.prefix_addr.ip.ipaddr_v4, buf,
+			   sizeof(buf)));
 	return str;
 }
 
@@ -981,15 +1002,15 @@ static const char *prefixevpn2str(const struct prefix_evpn *p, char *str,
 				  int size)
 {
 	switch (p->prefix.route_type) {
-	case 1:
+	case BGP_EVPN_AD_ROUTE:
 		return prefixevpn_ead2str(p, str, size);
-	case 2:
+	case BGP_EVPN_MAC_IP_ROUTE:
 		return prefixevpn_macip2str(p, str, size);
-	case 3:
+	case BGP_EVPN_IMET_ROUTE:
 		return prefixevpn_imet2str(p, str, size);
-	case 4:
+	case BGP_EVPN_ES_ROUTE:
 		return prefixevpn_es2str(p, str, size);
-	case 5:
+	case BGP_EVPN_IP_PREFIX_ROUTE:
 		return prefixevpn_prefix2str(p, str, size);
 	default:
 		snprintf(str, size, "Unsupported EVPN prefix");
@@ -1314,6 +1335,49 @@ char *esi_to_str(const esi_t *esi, char *buf, int size)
 		 esi->val[6], esi->val[7], esi->val[8],
 		 esi->val[9]);
 	return ptr;
+}
+
+char *evpn_es_df_alg2str(uint8_t df_alg, char *buf, int buf_len)
+{
+	switch (df_alg) {
+	case EVPN_MH_DF_ALG_SERVICE_CARVING:
+		snprintf(buf, buf_len, "service-carving");
+		break;
+
+	case EVPN_MH_DF_ALG_HRW:
+		snprintf(buf, buf_len, "HRW");
+		break;
+
+	case EVPN_MH_DF_ALG_PREF:
+		snprintf(buf, buf_len, "preference");
+		break;
+
+	default:
+		snprintf(buf, buf_len, "unknown %u", df_alg);
+		break;
+	}
+
+	return buf;
+}
+
+printfrr_ext_autoreg_p("EA", printfrr_ea)
+static ssize_t printfrr_ea(char *buf, size_t bsz, const char *fmt,
+			   int prec, const void *ptr)
+{
+	const struct ethaddr *mac = ptr;
+
+	prefix_mac2str(mac, buf, bsz);
+	return 2;
+}
+
+printfrr_ext_autoreg_p("IA", printfrr_ia)
+static ssize_t printfrr_ia(char *buf, size_t bsz, const char *fmt,
+			   int prec, const void *ptr)
+{
+	const struct ipaddr *ipa = ptr;
+
+	ipaddr2str(ipa, buf, bsz);
+	return 2;
 }
 
 printfrr_ext_autoreg_p("I4", printfrr_i4)

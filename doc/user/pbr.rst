@@ -39,7 +39,7 @@ listing of ECMP nexthops used to forward packets for when a pbr-map is matched.
    sub-mode where you can specify individual nexthops.  To exit this mode type
    exit or end as per normal conventions for leaving a sub-mode.
 
-.. clicmd:: nexthop [A.B.C.D|X:X::X:XX] [interface] [nexthop-vrf NAME] [label LABELS]
+.. clicmd:: nexthop [A.B.C.D|X:X::X:XX] [interface [onlink]] [nexthop-vrf NAME] [label LABELS]
 
    Create a v4 or v6 nexthop.  All normal rules for creating nexthops that you
    are used to are allowed here.  The syntax was intentionally kept the same as
@@ -122,6 +122,22 @@ end destination.
    Select the mark to match.  This is a linux only command and if attempted
    on another platform it will be denied.  This mark translates to the
    underlying `ip rule .... fwmark XXXX` command.
+
+.. clicmd:: match dscp (DSCP|0-63)
+
+   Match packets according to the specified differentiated services code point
+   (DSCP) in the IP header; if this value matches then forward the packet
+   according to the nexthop(s) specified. The passed DSCP value may also be a
+   standard name for a differentiated service code point like cs0 or af11.
+
+   You may only specify one dscp per route map sequence; to match on multiple
+   dscp values you will need to create several sequences, one for each value.
+
+.. clicmd:: match ecn (0-3)
+
+   Match packets according to the specified explicit congestion notification
+   (ECN) field in the IP header; if this value matches then forward the packet
+   according to the nexthop(s) specified.
 
 .. clicmd:: set nexthop-group NAME
 
@@ -241,6 +257,21 @@ causes the policy to be installed into the kernel.
    +--------+----------------------------+---------+
    | valid  | Is the map well-formed?    | Boolean |
    +--------+----------------------------+---------+
+
+.. _pbr-debugs:
+
+PBR Debugs
+===========
+
+.. index:: debug pbr
+.. clicmd:: debug pbr events|map|nht|zebra
+
+   Debug pbr in pbrd daemon. You specify what types of debugs to turn on.
+
+.. index:: debug zebra pbr
+.. clicmd:: debug zebra pbr
+
+   Debug pbr in zebra daemon.
 
 .. _pbr-details:
 

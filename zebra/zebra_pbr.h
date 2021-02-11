@@ -54,6 +54,8 @@ struct zebra_pbr_rule {
 	(r->rule.filter.filter_bm & PBR_FILTER_SRC_PORT)
 #define IS_RULE_FILTERING_ON_DST_PORT(r) \
 	(r->rule.filter.filter_bm & PBR_FILTER_DST_PORT)
+#define IS_RULE_FILTERING_ON_DSFIELD(r) \
+	(r->rule.filter.filter_bm & PBR_FILTER_DSFIELD)
 #define IS_RULE_FILTERING_ON_FWMARK(r) \
 	(r->rule.filter.filter_bm & PBR_FILTER_FWMARK)
 
@@ -77,6 +79,9 @@ struct zebra_pbr_ipset {
 	 * but value is an enum ipset_type
 	 */
 	uint32_t type;
+
+	uint8_t family;
+
 	char ipset_name[ZEBRA_IPSET_NAME_SIZE];
 };
 
@@ -148,6 +153,9 @@ struct zebra_pbr_iptable {
 	uint8_t protocol;
 
 	uint32_t nb_interface;
+	uint16_t flow_label;
+
+	uint8_t family;
 
 	struct list *interface_name_list;
 
@@ -155,6 +163,7 @@ struct zebra_pbr_iptable {
 };
 
 extern const struct message icmp_typecode_str[];
+extern const struct message icmpv6_typecode_str[];
 
 const char *zebra_pbr_ipset_type2str(uint32_t type);
 
@@ -168,13 +177,6 @@ void zebra_pbr_del_ipset_entry(struct zebra_pbr_ipset_entry *ipset);
 
 void zebra_pbr_add_iptable(struct zebra_pbr_iptable *iptable);
 void zebra_pbr_del_iptable(struct zebra_pbr_iptable *iptable);
-
-/*
- * Add, update or delete a rule from the
- * kernel, using info from a dataplane context.
- */
-extern enum zebra_dplane_result
-kernel_pbr_rule_update(struct zebra_dplane_ctx *ctx);
 
 /*
  * Get to know existing PBR rules in the kernel - typically called at startup.

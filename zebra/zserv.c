@@ -55,6 +55,7 @@
 #include "lib/frr_pthread.h"      /* for frr_pthread_new, frr_pthread_stop... */
 #include "lib/frratomic.h"        /* for atomic_load_explicit, atomic_stor... */
 #include "lib/lib_errors.h"       /* for generic ferr ids */
+#include "lib/printfrr.h"         /* for string functions */
 
 #include "zebra/debug.h"          /* for various debugging macros */
 #include "zebra/rib.h"            /* for rib_score_proto */
@@ -590,6 +591,7 @@ static void zserv_client_free(struct zserv *client)
 	/* Close file descriptor. */
 	if (client->sock) {
 		unsigned long nroutes;
+		unsigned long nnhgs;
 
 		close(client->sock);
 
@@ -599,6 +601,13 @@ static void zserv_client_free(struct zserv *client)
 			zlog_notice(
 				"client %d disconnected %lu %s routes removed from the rib",
 				client->sock, nroutes,
+				zebra_route_string(client->proto));
+
+			/* Not worrying about instance for now */
+			nnhgs = zebra_nhg_score_proto(client->proto);
+			zlog_notice(
+				"client %d disconnected %lu %s nhgs removed from the rib",
+				client->sock, nnhgs,
 				zebra_route_string(client->proto));
 		}
 		client->sock = -1;
@@ -628,8 +637,8 @@ static void zserv_client_free(struct zserv *client)
 		}
 
 		vrf_bitmap_free(client->redist_default[afi]);
+		vrf_bitmap_free(client->ridinfo[afi]);
 	}
-	vrf_bitmap_free(client->ridinfo);
 
 	/*
 	 * If any instance are graceful restart enabled,
@@ -750,8 +759,8 @@ static struct zserv *zserv_client_create(int sock)
 		for (i = 0; i < ZEBRA_ROUTE_MAX; i++)
 			client->redist[afi][i] = vrf_bitmap_init();
 		client->redist_default[afi] = vrf_bitmap_init();
+		client->ridinfo[afi] = vrf_bitmap_init();
 	}
-	client->ridinfo = vrf_bitmap_init();
 
 	/* Add this client to linked list. */
 	frr_with_mutex(&client_mutex) {
@@ -1025,6 +1034,9 @@ static void zebra_show_client_detail(struct vty *vty, struct zserv *client)
 	} else
 		vty_out(vty, "Not registered for Nexthop Updates\n");
 
+	vty_out(vty, "Client will %sbe notified about it's routes status\n",
+		client->notify_owner ? "" : "Not ");
+
 	last_read_time = (time_t)atomic_load_explicit(&client->last_read_time,
 						      memory_order_relaxed);
 	last_write_time = (time_t)atomic_load_explicit(&client->last_write_time,
@@ -1075,6 +1087,12 @@ static void zebra_show_client_detail(struct vty *vty, struct zserv *client)
 	vty_out(vty, "L3-VNI delete notifications: %u\n", client->l3vnidel_cnt);
 	vty_out(vty, "MAC-IP add notifications: %u\n", client->macipadd_cnt);
 	vty_out(vty, "MAC-IP delete notifications: %u\n", client->macipdel_cnt);
+	vty_out(vty, "ES add notifications: %u\n", client->local_es_add_cnt);
+	vty_out(vty, "ES delete notifications: %u\n", client->local_es_del_cnt);
+	vty_out(vty, "ES-EVI add notifications: %u\n",
+			client->local_es_evi_add_cnt);
+	vty_out(vty, "ES-EVI delete notifications: %u\n",
+			client->local_es_evi_del_cnt);
 
 	TAILQ_FOREACH (info, &client->gr_info_queue, gr_info) {
 		vty_out(vty, "VRF : %s\n", vrf_id_to_name(info->vrf_id));
@@ -1158,11 +1176,9 @@ static void zebra_show_stale_client_detail(struct vty *vty,
 				}
 			}
 			vty_out(vty, "Current AFI : %d\n", info->current_afi);
-			if (info->current_prefix) {
-				prefix2str(info->current_prefix, buf,
-					   sizeof(buf));
-				vty_out(vty, "Current prefix : %s\n", buf);
-			}
+			if (info->current_prefix)
+				vty_out(vty, "Current prefix : %pFX\n",
+					info->current_prefix);
 		}
 	}
 	vty_out(vty, "\n");
@@ -1171,6 +1187,7 @@ static void zebra_show_stale_client_detail(struct vty *vty,
 
 static void zebra_show_client_brief(struct vty *vty, struct zserv *client)
 {
+	char client_string[80];
 	char cbuf[ZEBRA_TIME_BUF], rbuf[ZEBRA_TIME_BUF];
 	char wbuf[ZEBRA_TIME_BUF];
 	time_t connect_time, last_read_time, last_write_time;
@@ -1182,8 +1199,15 @@ static void zebra_show_client_brief(struct vty *vty, struct zserv *client)
 	last_write_time = (time_t)atomic_load_explicit(&client->last_write_time,
 						       memory_order_relaxed);
 
-	vty_out(vty, "%-10s%12s %12s%12s%8d/%-8d%8d/%-8d\n",
-		zebra_route_string(client->proto),
+	if (client->instance || client->session_id)
+		snprintfrr(client_string, sizeof(client_string), "%s[%u:%u]",
+			   zebra_route_string(client->proto), client->instance,
+			   client->session_id);
+	else
+		snprintfrr(client_string, sizeof(client_string), "%s",
+			   zebra_route_string(client->proto));
+
+	vty_out(vty, "%-10s%12s %12s%12s%8d/%-8d%8d/%-8d\n", client_string,
 		zserv_time_buf(&connect_time, cbuf, ZEBRA_TIME_BUF),
 		zserv_time_buf(&last_read_time, rbuf, ZEBRA_TIME_BUF),
 		zserv_time_buf(&last_write_time, wbuf, ZEBRA_TIME_BUF),
@@ -1288,16 +1312,20 @@ DEFUN (show_zebra_client_summary,
 	return CMD_SUCCESS;
 }
 
-#if defined(HANDLE_ZAPI_FUZZING)
-void zserv_read_file(char *input)
+static int zserv_client_close_cb(struct zserv *closed_client)
 {
-	int fd;
+	struct listnode *node, *nnode;
+	struct zserv *client = NULL;
 
-	fd = open(input, O_RDONLY | O_NONBLOCK);
+	for (ALL_LIST_ELEMENTS(zrouter.client_list, node, nnode, client)) {
+		if (client->proto == closed_client->proto)
+			continue;
 
-	zserv_client_create(fd);
+		zsend_client_close_notify(client, closed_client);
+	}
+
+	return 0;
 }
-#endif
 
 void zserv_init(void)
 {
@@ -1311,4 +1339,6 @@ void zserv_init(void)
 
 	install_element(ENABLE_NODE, &show_zebra_client_cmd);
 	install_element(ENABLE_NODE, &show_zebra_client_summary_cmd);
+
+	hook_register(zserv_client_close, zserv_client_close_cb);
 }

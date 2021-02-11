@@ -286,8 +286,8 @@ static void vnc_redistribute_withdraw(struct bgp *bgp, afi_t afi, uint8_t type)
 {
 	struct prefix_rd prd;
 	struct bgp_table *table;
-	struct bgp_node *prn;
-	struct bgp_node *rn;
+	struct bgp_dest *pdest;
+	struct bgp_dest *dest;
 
 	vnc_zlog_debug_verbose("%s: entry", __func__);
 
@@ -302,25 +302,26 @@ static void vnc_redistribute_withdraw(struct bgp *bgp, afi_t afi, uint8_t type)
 	/*
 	 * Loop over all the RDs
 	 */
-	for (prn = bgp_table_top(bgp->rib[afi][SAFI_MPLS_VPN]); prn;
-	     prn = bgp_route_next(prn)) {
-		const struct prefix *prn_p = bgp_node_get_prefix(prn);
+	for (pdest = bgp_table_top(bgp->rib[afi][SAFI_MPLS_VPN]); pdest;
+	     pdest = bgp_route_next(pdest)) {
+		const struct prefix *pdest_p = bgp_dest_get_prefix(pdest);
 
 		memset(&prd, 0, sizeof(prd));
 		prd.family = AF_UNSPEC;
 		prd.prefixlen = 64;
-		memcpy(prd.val, prn_p->u.val, 8);
+		memcpy(prd.val, pdest_p->u.val, 8);
 
 		/* This is the per-RD table of prefixes */
-		table = bgp_node_get_bgp_table_info(prn);
+		table = bgp_dest_get_bgp_table_info(pdest);
 		if (!table)
 			continue;
 
-		for (rn = bgp_table_top(table); rn; rn = bgp_route_next(rn)) {
+		for (dest = bgp_table_top(table); dest;
+		     dest = bgp_route_next(dest)) {
 
 			struct bgp_path_info *ri;
 
-			for (ri = bgp_node_get_bgp_path_info(rn); ri;
+			for (ri = bgp_dest_get_bgp_path_info(dest); ri;
 			     ri = ri->next) {
 				if (ri->type
 				    == type) { /* has matching redist type */
@@ -331,7 +332,7 @@ static void vnc_redistribute_withdraw(struct bgp *bgp, afi_t afi, uint8_t type)
 				del_vnc_route(
 					&vncHD1VR, /* use dummy ptr as cookie */
 					vncHD1VR.peer, bgp, SAFI_MPLS_VPN,
-					bgp_node_get_prefix(rn), &prd, type,
+					bgp_dest_get_prefix(dest), &prd, type,
 					BGP_ROUTE_REDISTRIBUTE, NULL, 0);
 			}
 		}
@@ -362,15 +363,11 @@ static int vnc_zebra_read_route(ZAPI_CALLBACK_ARGS)
 	else
 		vnc_redistribute_delete(&api.prefix, api.type);
 
-	if (BGP_DEBUG(zebra, ZEBRA)) {
-		char buf[PREFIX_STRLEN];
-
-		prefix2str(&api.prefix, buf, sizeof(buf));
+	if (BGP_DEBUG(zebra, ZEBRA))
 		vnc_zlog_debug_verbose(
-			"%s: Zebra rcvd: route delete %s %s metric %u",
-			__func__, zebra_route_string(api.type), buf,
+			"%s: Zebra rcvd: route delete %s %pFX metric %u",
+			__func__, zebra_route_string(api.type), &api.prefix,
 			api.metric);
-	}
 
 	return 0;
 }
@@ -424,14 +421,10 @@ static void vnc_zebra_route_msg(const struct prefix *p, unsigned int nhp_count,
 		}
 	}
 
-	if (BGP_DEBUG(zebra, ZEBRA)) {
-		char buf[PREFIX_STRLEN];
-
-		prefix2str(&api.prefix, buf, sizeof(buf));
+	if (BGP_DEBUG(zebra, ZEBRA))
 		vnc_zlog_debug_verbose(
-			"%s: Zebra send: route %s %s, nhp_count=%d", __func__,
-			(add ? "add" : "del"), buf, nhp_count);
-	}
+			"%s: Zebra send: route %s %pFX, nhp_count=%d", __func__,
+			(add ? "add" : "del"), &api.prefix, nhp_count);
 
 	zclient_route_send((add ? ZEBRA_ROUTE_ADD : ZEBRA_ROUTE_DELETE),
 			   zclient_vnc, &api);

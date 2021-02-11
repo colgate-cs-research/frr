@@ -135,7 +135,7 @@ struct zserv {
 	vrf_bitmap_t redist_default[AFI_MAX];
 
 	/* Router-id information. */
-	vrf_bitmap_t ridinfo;
+	vrf_bitmap_t ridinfo[AFI_MAX];
 
 	bool notify_owner;
 
@@ -194,6 +194,10 @@ struct zserv {
 	uint32_t v6_nh_watch_rem_cnt;
 	uint32_t vxlan_sg_add_cnt;
 	uint32_t vxlan_sg_del_cnt;
+	uint32_t local_es_add_cnt;
+	uint32_t local_es_del_cnt;
+	uint32_t local_es_evi_add_cnt;
+	uint32_t local_es_evi_del_cnt;
 	uint32_t error_cnt;
 
 	time_t nh_reg_time;
@@ -370,10 +374,6 @@ extern void zserv_close_client(struct zserv *client);
  */
 void zserv_log_message(const char *errmsg, struct stream *msg,
 		       struct zmsghdr *hdr);
-
-#if defined(HANDLE_ZAPI_FUZZING)
-extern void zserv_read_file(char *input);
-#endif
 
 /* TODO */
 __attribute__((__noreturn__)) int zebra_finalize(struct thread *event);

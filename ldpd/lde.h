@@ -125,6 +125,9 @@ struct fec_node {
 	struct lde_map_head	 upstream;	/* sent mappings */
 
 	uint32_t		 local_label;
+
+	uint32_t		 pw_remote_status;
+
 	void			*data;		/* fec specific data */
 };
 
@@ -153,6 +156,8 @@ uint32_t	 lde_update_label(struct fec_node *);
 void		 lde_free_label(uint32_t label);
 void		 lde_send_change_klabel(struct fec_node *, struct fec_nh *);
 void		 lde_send_delete_klabel(struct fec_node *, struct fec_nh *);
+void		 lde_fec2prefix(const struct fec *fec, struct prefix *prefix);
+void		 lde_prefix2fec(const struct prefix *prefix, struct fec *fec);
 void		 lde_fec2map(struct fec *, struct map *);
 void		 lde_map2fec(struct map *, struct in_addr, struct fec *);
 void		 lde_send_labelmapping(struct lde_nbr *, struct fec_node *,
@@ -190,6 +195,9 @@ void		 lde_change_allocate_filter(int);
 void		 lde_change_advertise_filter(int);
 void		 lde_change_accept_filter(int);
 void		 lde_change_expnull_for_filter(int);
+void		 lde_route_update(struct iface *, int);
+void		 lde_route_update_release(struct iface *, int);
+void		 lde_route_update_release_all(int);
 struct lde_addr	*lde_address_find(struct lde_nbr *, int,
 		    union ldpd_addr *);
 
@@ -209,7 +217,7 @@ void		 lde_kernel_insert(struct fec *, int, union ldpd_addr *,
 void		 lde_kernel_remove(struct fec *, int, union ldpd_addr *,
 		    ifindex_t, uint8_t, unsigned short);
 void		 lde_kernel_update(struct fec *);
-void		 lde_check_mapping(struct map *, struct lde_nbr *);
+void		 lde_check_mapping(struct map *, struct lde_nbr *, int);
 void		 lde_check_request(struct map *, struct lde_nbr *);
 void		 lde_check_request_wcard(struct map *, struct lde_nbr *);
 void		 lde_check_release(struct map *, struct lde_nbr *);

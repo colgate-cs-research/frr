@@ -55,15 +55,19 @@ DEFINE_MTYPE_STATIC(LIB, STREAM_FIFO, "Stream FIFO")
  * using stream_put..._at() functions.
  */
 #define STREAM_WARN_OFFSETS(S)                                                 \
-	flog_warn(EC_LIB_STREAM,                                               \
-		  "&(struct stream): %p, size: %lu, getp: %lu, endp: %lu\n",   \
-		  (void *)(S), (unsigned long)(S)->size,                       \
-		  (unsigned long)(S)->getp, (unsigned long)(S)->endp)
+	do {                                                                   \
+		flog_warn(EC_LIB_STREAM,				       \
+			  "&(struct stream): %p, size: %lu, getp: %lu, endp: %lu\n", \
+			  (void *)(S), (unsigned long)(S)->size,	       \
+			  (unsigned long)(S)->getp, (unsigned long)(S)->endp); \
+		zlog_backtrace(LOG_WARNING);				       \
+	} while (0)
 
 #define STREAM_VERIFY_SANE(S)                                                  \
 	do {                                                                   \
-		if (!(GETP_VALID(S, (S)->getp) && ENDP_VALID(S, (S)->endp)))   \
+		if (!(GETP_VALID(S, (S)->getp) && ENDP_VALID(S, (S)->endp))) { \
 			STREAM_WARN_OFFSETS(S);                                \
+		}                                                              \
 		assert(GETP_VALID(S, (S)->getp));                              \
 		assert(ENDP_VALID(S, (S)->endp));                              \
 	} while (0)
@@ -252,6 +256,42 @@ void stream_forward_getp(struct stream *s, size_t size)
 	s->getp += size;
 }
 
+bool stream_forward_getp2(struct stream *s, size_t size)
+{
+	STREAM_VERIFY_SANE(s);
+
+	if (!GETP_VALID(s, s->getp + size))
+		return false;
+
+	s->getp += size;
+
+	return true;
+}
+
+void stream_rewind_getp(struct stream *s, size_t size)
+{
+	STREAM_VERIFY_SANE(s);
+
+	if (size > s->getp || !GETP_VALID(s, s->getp - size)) {
+		STREAM_BOUND_WARN(s, "rewind getp");
+		return;
+	}
+
+	s->getp -= size;
+}
+
+bool stream_rewind_getp2(struct stream *s, size_t size)
+{
+	STREAM_VERIFY_SANE(s);
+
+	if (size > s->getp || !GETP_VALID(s, s->getp - size))
+		return false;
+
+	s->getp -= size;
+
+	return true;
+}
+
 void stream_forward_endp(struct stream *s, size_t size)
 {
 	STREAM_VERIFY_SANE(s);
@@ -262,6 +302,18 @@ void stream_forward_endp(struct stream *s, size_t size)
 	}
 
 	s->endp += size;
+}
+
+bool stream_forward_endp2(struct stream *s, size_t size)
+{
+	STREAM_VERIFY_SANE(s);
+
+	if (!ENDP_VALID(s, s->endp + size))
+		return false;
+
+	s->endp += size;
+
+	return true;
 }
 
 /* Copy from stream to destination. */
@@ -582,6 +634,43 @@ uint32_t stream_get_ipv4(struct stream *s)
 	return l;
 }
 
+bool stream_get_ipaddr(struct stream *s, struct ipaddr *ip)
+{
+	uint16_t ipa_len;
+
+	STREAM_VERIFY_SANE(s);
+
+	/* Get address type. */
+	if (STREAM_READABLE(s) < sizeof(uint16_t)) {
+		STREAM_BOUND_WARN2(s, "get ipaddr");
+		return false;
+	}
+	ip->ipa_type = stream_getw(s);
+
+	/* Get address value. */
+	switch (ip->ipa_type) {
+	case IPADDR_V4:
+		ipa_len = IPV4_MAX_BYTELEN;
+		break;
+	case IPADDR_V6:
+		ipa_len = IPV6_MAX_BYTELEN;
+		break;
+	default:
+		flog_err(EC_LIB_DEVELOPMENT,
+			 "%s: unknown ip address-family: %u", __func__,
+			 ip->ipa_type);
+		return false;
+	}
+	if (STREAM_READABLE(s) < ipa_len) {
+		STREAM_BOUND_WARN2(s, "get ipaddr");
+		return false;
+	}
+	memcpy(&ip->ip, s->data + s->getp, ipa_len);
+	s->getp += ipa_len;
+
+	return true;
+}
+
 float stream_getf(struct stream *s)
 {
 	union {
@@ -846,6 +935,27 @@ int stream_put_in_addr(struct stream *s, const struct in_addr *addr)
 	s->endp += sizeof(uint32_t);
 
 	return sizeof(uint32_t);
+}
+
+bool stream_put_ipaddr(struct stream *s, struct ipaddr *ip)
+{
+	stream_putw(s, ip->ipa_type);
+
+	switch (ip->ipa_type) {
+	case IPADDR_V4:
+		stream_put_in_addr(s, &ip->ipaddr_v4);
+		break;
+	case IPADDR_V6:
+		stream_write(s, (uint8_t *)&ip->ipaddr_v6, 16);
+		break;
+	default:
+		flog_err(EC_LIB_DEVELOPMENT,
+			 "%s: unknown ip address-family: %u", __func__,
+			 ip->ipa_type);
+		return false;
+	}
+
+	return true;
 }
 
 /* Put in_addr at location in the stream. */
@@ -1261,4 +1371,20 @@ void stream_fifo_free(struct stream_fifo *fifo)
 {
 	stream_fifo_deinit(fifo);
 	XFREE(MTYPE_STREAM_FIFO, fifo);
+}
+
+void stream_pulldown(struct stream *s)
+{
+	size_t rlen = STREAM_READABLE(s);
+
+	/* No more data, so just move the pointers. */
+	if (rlen == 0) {
+		stream_reset(s);
+		return;
+	}
+
+	/* Move the available data to the beginning. */
+	memmove(s->data, &s->data[s->getp], rlen);
+	s->getp = 0;
+	s->endp = rlen;
 }

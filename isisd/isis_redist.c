@@ -100,8 +100,7 @@ static void isis_redist_install(struct isis_area *area, int level,
 
 	if (!er_table) {
 		zlog_warn(
-			"%s: External reachability table of area %s"
-			" is not initialized.",
+			"%s: External reachability table of area %s is not initialized.",
 			__func__, area->area_tag);
 		return;
 	}
@@ -134,8 +133,7 @@ static void isis_redist_uninstall(struct isis_area *area, int level,
 
 	if (!er_table) {
 		zlog_warn(
-			"%s: External reachability table of area %s"
-			" is not initialized.",
+			"%s: External reachability table of area %s is not initialized.",
 			__func__, area->area_tag);
 		return;
 	}
@@ -169,8 +167,7 @@ static void isis_redist_update_ext_reach(struct isis_area *area, int level,
 	area_info.metric = redist->metric;
 
 	if (redist->map_name) {
-		map_ret =
-			route_map_apply(redist->map, p, RMAP_ISIS, &area_info);
+		map_ret = route_map_apply(redist->map, p, &area_info);
 		if (map_ret == RMAP_DENYMATCH)
 			area_info.distance = 255;
 	}
@@ -220,8 +217,9 @@ static void isis_redist_ensure_default(struct isis *isis, int family)
 }
 
 /* Handle notification about route being added */
-void isis_redist_add(int type, struct prefix *p, struct prefix_ipv6 *src_p,
-		     uint8_t distance, uint32_t metric)
+void isis_redist_add(struct isis *isis, int type, struct prefix *p,
+		     struct prefix_ipv6 *src_p, uint8_t distance,
+		     uint32_t metric)
 {
 	int family = p->family;
 	struct route_table *ei_table = get_ext_info(isis, family);
@@ -232,11 +230,8 @@ void isis_redist_add(int type, struct prefix *p, struct prefix_ipv6 *src_p,
 	int level;
 	struct isis_redist *redist;
 
-	char debug_buf[BUFSIZ];
-	prefix2str(p, debug_buf, sizeof(debug_buf));
-
-	zlog_debug("%s: New route %s from %s: distance %d.", __func__,
-		   debug_buf, zebra_route_string(type), distance);
+	zlog_debug("%s: New route %pFX from %s: distance %d.", __func__, p,
+		   zebra_route_string(type), distance);
 
 	if (!ei_table) {
 		zlog_warn("%s: External information table not initialized.",
@@ -272,7 +267,8 @@ void isis_redist_add(int type, struct prefix *p, struct prefix_ipv6 *src_p,
 		}
 }
 
-void isis_redist_delete(int type, struct prefix *p, struct prefix_ipv6 *src_p)
+void isis_redist_delete(struct isis *isis, int type, struct prefix *p,
+			struct prefix_ipv6 *src_p)
 {
 	int family = p->family;
 	struct route_table *ei_table = get_ext_info(isis, family);
@@ -282,10 +278,7 @@ void isis_redist_delete(int type, struct prefix *p, struct prefix_ipv6 *src_p)
 	int level;
 	struct isis_redist *redist;
 
-	char debug_buf[BUFSIZ];
-	prefix2str(p, debug_buf, sizeof(debug_buf));
-
-	zlog_debug("%s: Removing route %s from %s.", __func__, debug_buf,
+	zlog_debug("%s: Removing route %pFX from %s.", __func__, p,
 		   zebra_route_string(type));
 
 	if (is_default_prefix(p)
@@ -294,8 +287,8 @@ void isis_redist_delete(int type, struct prefix *p, struct prefix_ipv6 *src_p)
 		 * by "default-information originate always". Areas without the
 		 * "always" setting will ignore routes with origin
 		 * DEFAULT_ROUTE. */
-		isis_redist_add(DEFAULT_ROUTE, p, NULL,
-				254, MAX_WIDE_PATH_METRIC);
+		isis_redist_add(isis, DEFAULT_ROUTE, p, NULL, 254,
+				MAX_WIDE_PATH_METRIC);
 		return;
 	}
 
@@ -307,12 +300,9 @@ void isis_redist_delete(int type, struct prefix *p, struct prefix_ipv6 *src_p)
 
 	ei_node = srcdest_rnode_lookup(ei_table, p, src_p);
 	if (!ei_node || !ei_node->info) {
-		char buf[BUFSIZ];
-		prefix2str(p, buf, sizeof(buf));
 		zlog_warn(
-			"%s: Got a delete for %s route %s, but that route"
-			" was never added.",
-			__func__, zebra_route_string(type), buf);
+			"%s: Got a delete for %s route %pFX, but that route was never added.",
+			__func__, zebra_route_string(type), p);
 		if (ei_node)
 			route_unlock_node(ei_node);
 		return;
@@ -387,6 +377,19 @@ static void isis_redist_update_zebra_subscriptions(struct isis *isis)
 			else
 				isis_zebra_redistribute_unset(afi, type);
 		}
+}
+
+void isis_redist_free(struct isis *isis)
+{
+	int i;
+
+	for (i = 0; i < REDIST_PROTOCOL_COUNT; i++) {
+		if (!isis->ext_info[i])
+			continue;
+
+		route_table_finish(isis->ext_info[i]);
+		isis->ext_info[i] = NULL;
+	}
 }
 
 void isis_redist_set(struct isis_area *area, int level, int family, int type,
@@ -605,8 +608,7 @@ DEFUN (no_isis_redistribute,
 
 DEFUN (isis_default_originate,
        isis_default_originate_cmd,
-       "default-information originate <ipv4|ipv6>"
-       " [always] [{metric (0-16777215)|route-map WORD}]",
+       "default-information originate <ipv4|ipv6> [always] [{metric (0-16777215)|route-map WORD}]",
        "Control distribution of default information\n"
        "Distribute a default route\n"
        "Distribute default route for IPv4\n"

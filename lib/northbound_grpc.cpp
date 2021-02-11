@@ -677,11 +677,13 @@ class NorthboundImpl
 
 			switch (phase) {
 			case frr::CommitRequest::VALIDATE:
+				zlog_debug("`-> Performing VALIDATE");
 				ret = nb_candidate_validate(
 					&context, candidate->config, errmsg,
 					sizeof(errmsg));
 				break;
 			case frr::CommitRequest::PREPARE:
+				zlog_debug("`-> Performing PREPARE");
 				ret = nb_candidate_commit_prepare(
 					&context, candidate->config,
 					comment.c_str(),
@@ -689,15 +691,20 @@ class NorthboundImpl
 					sizeof(errmsg));
 				break;
 			case frr::CommitRequest::ABORT:
+				zlog_debug("`-> Performing ABORT");
 				nb_candidate_commit_abort(
-					candidate->transaction);
+					candidate->transaction, errmsg,
+					sizeof(errmsg));
 				break;
 			case frr::CommitRequest::APPLY:
+				zlog_debug("`-> Performing ABORT");
 				nb_candidate_commit_apply(
 					candidate->transaction, true,
-					&transaction_id);
+					&transaction_id, errmsg,
+					sizeof(errmsg));
 				break;
 			case frr::CommitRequest::ALL:
+				zlog_debug("`-> Performing ALL");
 				ret = nb_candidate_commit(
 					&context, candidate->config, true,
 					comment.c_str(), &transaction_id,
@@ -735,12 +742,20 @@ class NorthboundImpl
 					grpc::StatusCode::INTERNAL, errmsg);
 				break;
 			}
+
+			if (nb_dbg_client_grpc)
+				zlog_debug("`-> Result: %s (message: '%s')",
+					   nb_err_name((enum nb_error)ret),
+					   errmsg);
+
 			if (ret == NB_OK) {
 				// Response: uint32 transaction_id = 1;
 				if (transaction_id)
 					tag->response.set_transaction_id(
 						transaction_id);
 			}
+			if (strlen(errmsg) > 0)
+				tag->response.set_error_message(errmsg);
 
 			tag->responder.Finish(tag->response, status, tag);
 			tag->state = FINISH;
@@ -947,6 +962,7 @@ class NorthboundImpl
 		struct listnode *node;
 		struct yang_data *data;
 		const char *xpath;
+		char errmsg[BUFSIZ] = {0};
 
 		switch (tag->state) {
 		case CREATE:
@@ -997,7 +1013,7 @@ class NorthboundImpl
 
 			// Execute callback registered for this XPath.
 			if (nb_callback_rpc(nb_node, xpath, input_list,
-					    output_list)
+					    output_list, errmsg, sizeof(errmsg))
 			    != NB_OK) {
 				flog_warn(EC_LIB_NB_CB_RPC,
 					  "%s: rpc callback failed: %s",
@@ -1281,10 +1297,13 @@ class NorthboundImpl
 
 	void delete_candidate(struct candidate *candidate)
 	{
+		char errmsg[BUFSIZ] = {0};
+
 		_candidates.erase(candidate->id);
 		nb_config_free(candidate->config);
 		if (candidate->transaction)
-			nb_candidate_commit_abort(candidate->transaction);
+			nb_candidate_commit_abort(candidate->transaction,
+						  errmsg, sizeof(errmsg));
 	}
 
 	struct candidate *get_candidate(uint32_t candidate_id)

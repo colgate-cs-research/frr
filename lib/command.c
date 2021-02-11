@@ -49,6 +49,8 @@
 #include "northbound_cli.h"
 #include "network.h"
 
+#include "frrscript.h"
+
 DEFINE_MTYPE_STATIC(LIB, HOST, "Host config")
 DEFINE_MTYPE(LIB, COMPLETION, "Completion item")
 
@@ -139,12 +141,36 @@ static struct cmd_node config_node = {
 	.node_exit = vty_config_node_exit,
 };
 
+static bool vty_check_node_for_xpath_decrement(enum node_type target_node,
+					       enum node_type node)
+{
+	/* bgp afi-safi (`address-family <afi> <safi>`) node
+	 * does not increment xpath_index.
+	 * In order to use (`router bgp`) BGP_NODE's xpath as a base,
+	 * retain xpath_index as 1 upon exiting from
+	 * afi-safi node.
+	 */
+
+	if (target_node == BGP_NODE
+	    && (node == BGP_IPV4_NODE || node == BGP_IPV6_NODE
+		|| node == BGP_IPV4M_NODE || node == BGP_IPV6M_NODE
+		|| node == BGP_VPNV4_NODE || node == BGP_VPNV6_NODE
+		|| node == BGP_EVPN_NODE || node == BGP_IPV4L_NODE
+		|| node == BGP_IPV6L_NODE || node == BGP_FLOWSPECV4_NODE
+		|| node == BGP_FLOWSPECV6_NODE))
+		return false;
+
+	return true;
+}
+
 /* This is called from main when a daemon is invoked with -v or --version. */
 void print_version(const char *progname)
 {
 	printf("%s version %s\n", progname, FRR_VERSION);
 	printf("%s\n", FRR_COPYRIGHT);
+#ifdef ENABLE_VERSION_BUILD_CONFIG
 	printf("configured with:\n\t%s\n", FRR_CONFIG_ARGS);
+#endif
 }
 
 char *argv_concat(struct cmd_token **argv, int argc, int shift)
@@ -251,7 +277,7 @@ const char *cmd_prompt(enum node_type node)
 }
 
 /* Install a command into a node. */
-void install_element(enum node_type ntype, const struct cmd_element *cmd)
+void _install_element(enum node_type ntype, const struct cmd_element *cmd)
 {
 	struct cmd_node *cnode;
 
@@ -297,7 +323,7 @@ void install_element(enum node_type ntype, const struct cmd_element *cmd)
 	vector_set(cnode->cmd_vector, (void *)cmd);
 
 	if (ntype == VIEW_NODE)
-		install_element(ENABLE_NODE, cmd);
+		_install_element(ENABLE_NODE, cmd);
 }
 
 void uninstall_element(enum node_type ntype, const struct cmd_element *cmd)
@@ -839,6 +865,30 @@ enum node_type node_parent(enum node_type node)
 	case BFD_PROFILE_NODE:
 		ret = BFD_NODE;
 		break;
+	case SR_TRAFFIC_ENG_NODE:
+		ret = SEGMENT_ROUTING_NODE;
+		break;
+	case SR_SEGMENT_LIST_NODE:
+		ret = SR_TRAFFIC_ENG_NODE;
+		break;
+	case SR_POLICY_NODE:
+		ret = SR_TRAFFIC_ENG_NODE;
+		break;
+	case SR_CANDIDATE_DYN_NODE:
+		ret = SR_POLICY_NODE;
+		break;
+	case PCEP_NODE:
+		ret = SR_TRAFFIC_ENG_NODE;
+		break;
+	case PCEP_PCE_CONFIG_NODE:
+		ret = PCEP_NODE;
+		break;
+	case PCEP_PCE_NODE:
+		ret = PCEP_NODE;
+		break;
+	case PCEP_PCC_NODE:
+		ret = PCEP_NODE;
+		break;
 	default:
 		ret = CONFIG_NODE;
 		break;
@@ -902,6 +952,13 @@ static int cmd_execute_command_real(vector vline, enum cmd_filter_type filter,
 				       > vty->candidate_config->version)
 				nb_config_replace(vty->candidate_config,
 						  running_config, true);
+
+			/*
+			 * Perform pending commit (if any) before executing
+			 * non-YANG command.
+			 */
+			if (matched_element->attr != CMD_ATTR_YANG)
+				nb_cli_pending_commit_check(vty);
 		}
 
 		ret = matched_element->func(matched_element, vty, argc, argv);
@@ -976,7 +1033,9 @@ int cmd_execute_command(vector vline, struct vty *vty,
 		while (vty->node > CONFIG_NODE) {
 			try_node = node_parent(try_node);
 			vty->node = try_node;
-			if (vty->xpath_index > 0)
+			if (vty->xpath_index > 0
+			    && vty_check_node_for_xpath_decrement(try_node,
+								  onode))
 				vty->xpath_index--;
 			ret = cmd_execute_command_real(vline, FILTER_RELAXED,
 						       vty, cmd);
@@ -1055,6 +1114,7 @@ static int handle_pipe_action(struct vty *vty, const char *cmd_in,
 	/* look for `|` */
 	char *orig, *working, *token, *u;
 	char *pipe = strstr(cmd_in, "| ");
+	int ret = 0;
 
 	if (!pipe)
 		return 0;
@@ -1073,6 +1133,7 @@ static int handle_pipe_action(struct vty *vty, const char *cmd_in,
 
 		if (!regexp) {
 			vty_out(vty, "%% Need a regexp to filter with\n");
+			ret = 1;
 			goto fail;
 		}
 
@@ -1080,6 +1141,7 @@ static int handle_pipe_action(struct vty *vty, const char *cmd_in,
 
 		if (!succ) {
 			vty_out(vty, "%% Bad regexp '%s'\n", regexp);
+			ret = 1;
 			goto fail;
 		}
 		*cmd_out = XSTRDUP(MTYPE_TMP, cmd_in);
@@ -1087,12 +1149,13 @@ static int handle_pipe_action(struct vty *vty, const char *cmd_in,
 		strsep(&u, "|");
 	} else {
 		vty_out(vty, "%% Unknown action '%s'\n", token);
+		ret = 1;
 		goto fail;
 	}
 
 fail:
 	XFREE(MTYPE_TMP, orig);
-	return 0;
+	return ret;
 }
 
 static int handle_pipe_action_done(struct vty *vty, const char *cmd_exec)
@@ -1108,10 +1171,15 @@ int cmd_execute(struct vty *vty, const char *cmd,
 {
 	int ret;
 	char *cmd_out = NULL;
-	const char *cmd_exec;
+	const char *cmd_exec = NULL;
 	vector vline;
 
-	hook_call(cmd_execute, vty, cmd, &cmd_out);
+	ret = hook_call(cmd_execute, vty, cmd, &cmd_out);
+	if (ret) {
+		ret = CMD_WARNING;
+		goto free;
+	}
+
 	cmd_exec = cmd_out ? (const char *)cmd_out : cmd;
 
 	vline = cmd_make_strvec(cmd_exec);
@@ -1123,6 +1191,7 @@ int cmd_execute(struct vty *vty, const char *cmd,
 		ret = CMD_SUCCESS;
 	}
 
+free:
 	hook_call(cmd_execute_done, vty, cmd_exec);
 
 	XFREE(MTYPE_TMP, cmd_out);
@@ -1175,7 +1244,9 @@ int command_config_read_one_line(struct vty *vty,
 		       && ret != CMD_SUCCESS && ret != CMD_WARNING
 		       && vty->node > CONFIG_NODE) {
 			vty->node = node_parent(vty->node);
-			if (vty->xpath_index > 0)
+			if (vty->xpath_index > 0
+			    && vty_check_node_for_xpath_decrement(vty->node,
+								  saved_node))
 				vty->xpath_index--;
 			ret = cmd_execute_command_strict(vline, vty, cmd);
 		}
@@ -1297,7 +1368,8 @@ void cmd_exit(struct vty *vty)
 	}
 	if (cnode->parent_node)
 		vty->node = cnode->parent_node;
-	if (vty->xpath_index > 0)
+	if (vty->xpath_index > 0
+	    && vty_check_node_for_xpath_decrement(vty->node, cnode->node))
 		vty->xpath_index--;
 }
 
@@ -1334,8 +1406,9 @@ DEFUN (show_version,
 	vty_out(vty, "%s %s (%s).\n", FRR_FULL_NAME, FRR_VERSION,
 		cmd_hostname_get() ? cmd_hostname_get() : "");
 	vty_out(vty, "%s%s\n", FRR_COPYRIGHT, GIT_INFO);
+#ifdef ENABLE_VERSION_BUILD_CONFIG
 	vty_out(vty, "configured with:\n    %s\n", FRR_CONFIG_ARGS);
-
+#endif
 	return CMD_SUCCESS;
 }
 
@@ -2232,6 +2305,31 @@ done:
 	return CMD_SUCCESS;
 }
 
+#if defined(DEV_BUILD) && defined(HAVE_SCRIPTING)
+DEFUN(script,
+      script_cmd,
+      "script SCRIPT",
+      "Test command - execute a script\n"
+      "Script name (same as filename in /etc/frr/scripts/\n")
+{
+	struct prefix p;
+
+	(void)str2prefix("1.2.3.4/24", &p);
+
+	struct frrscript *fs = frrscript_load(argv[1]->arg, NULL);
+
+	if (fs == NULL) {
+		vty_out(vty, "Script '/etc/frr/scripts/%s.lua' not found\n",
+			argv[1]->arg);
+	} else {
+		int ret = frrscript_call(fs, NULL);
+		vty_out(vty, "Script result: %d\n", ret);
+	}
+
+	return CMD_SUCCESS;
+}
+#endif
+
 /* Set config filename.  Called from vty.c */
 void host_config_set(const char *filename)
 {
@@ -2246,18 +2344,18 @@ const char *host_config_get(void)
 
 void install_default(enum node_type node)
 {
-	install_element(node, &config_exit_cmd);
-	install_element(node, &config_quit_cmd);
-	install_element(node, &config_end_cmd);
-	install_element(node, &config_help_cmd);
-	install_element(node, &config_list_cmd);
-	install_element(node, &show_cli_graph_cmd);
-	install_element(node, &find_cmd);
+	_install_element(node, &config_exit_cmd);
+	_install_element(node, &config_quit_cmd);
+	_install_element(node, &config_end_cmd);
+	_install_element(node, &config_help_cmd);
+	_install_element(node, &config_list_cmd);
+	_install_element(node, &show_cli_graph_cmd);
+	_install_element(node, &find_cmd);
 
-	install_element(node, &config_write_cmd);
-	install_element(node, &show_running_config_cmd);
+	_install_element(node, &config_write_cmd);
+	_install_element(node, &show_running_config_cmd);
 
-	install_element(node, &autocomplete_cmd);
+	_install_element(node, &autocomplete_cmd);
 
 	nb_cli_install_default(node);
 }
@@ -2326,6 +2424,10 @@ void cmd_init(int terminal)
 		install_element(VIEW_NODE, &echo_cmd);
 		install_element(VIEW_NODE, &autocomplete_cmd);
 		install_element(VIEW_NODE, &find_cmd);
+#if defined(DEV_BUILD) && defined(HAVE_SCRIPTING)
+		install_element(VIEW_NODE, &script_cmd);
+#endif
+
 
 		install_element(ENABLE_NODE, &config_end_cmd);
 		install_element(ENABLE_NODE, &config_disable_cmd);

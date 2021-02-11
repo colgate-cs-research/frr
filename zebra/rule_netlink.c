@@ -55,13 +55,15 @@
  *
  * Encodes netlink RTM_ADDRULE/RTM_DELRULE message to buffer buf of size buflen.
  *
- * Returns -1 on failure or the number of bytes
- * written to buf.
+ * Returns -1 on failure, 0 when the msg doesn't fit entirely in the buffer
+ * or the number of bytes written to buf.
  */
-static ssize_t netlink_rule_msg_encode(
-	int cmd, const struct zebra_dplane_ctx *ctx, uint32_t filter_bm,
-	uint32_t priority, uint32_t table, const struct prefix *src_ip,
-	const struct prefix *dst_ip, uint32_t fwmark, void *buf, size_t buflen)
+static ssize_t
+netlink_rule_msg_encode(int cmd, const struct zebra_dplane_ctx *ctx,
+			uint32_t filter_bm, uint32_t priority, uint32_t table,
+			const struct prefix *src_ip,
+			const struct prefix *dst_ip, uint32_t fwmark,
+			uint8_t dsfield, void *buf, size_t buflen)
 {
 	uint8_t protocol = RTPROT_ZEBRA;
 	int family;
@@ -72,12 +74,20 @@ static ssize_t netlink_rule_msg_encode(
 		char buf[];
 	} *req = buf;
 
-	const char *ifname = dplane_ctx_get_ifname(ctx);
-	char buf1[PREFIX_STRLEN];
-	char buf2[PREFIX_STRLEN];
+	const char *ifname = dplane_ctx_rule_get_ifname(ctx);
 
+	if (buflen < sizeof(*req))
+		return 0;
 	memset(req, 0, sizeof(*req));
-	family = PREFIX_FAMILY(src_ip);
+
+	/* Assume ipv4 if no src/dst set, we only support ipv4/ipv6 */
+	if (PREFIX_FAMILY(src_ip))
+		family = PREFIX_FAMILY(src_ip);
+	else if (PREFIX_FAMILY(dst_ip))
+		family = PREFIX_FAMILY(dst_ip);
+	else
+		family = AF_INET;
+
 	bytelen = (family == AF_INET ? 4 : 16);
 
 	req->n.nlmsg_type = cmd;
@@ -87,96 +97,112 @@ static ssize_t netlink_rule_msg_encode(
 	req->frh.family = family;
 	req->frh.action = FR_ACT_TO_TBL;
 
-	addattr_l(&req->n, buflen, FRA_PROTOCOL, &protocol, sizeof(protocol));
+	if (!nl_attr_put(&req->n, buflen, FRA_PROTOCOL, &protocol,
+			 sizeof(protocol)))
+		return 0;
 
 	/* rule's pref # */
-	addattr32(&req->n, buflen, FRA_PRIORITY, priority);
+	if (!nl_attr_put32(&req->n, buflen, FRA_PRIORITY, priority))
+		return 0;
 
 	/* interface on which applied */
-	addattr_l(&req->n, buflen, FRA_IFNAME, ifname, strlen(ifname) + 1);
+	if (!nl_attr_put(&req->n, buflen, FRA_IFNAME, ifname,
+			 strlen(ifname) + 1))
+		return 0;
 
 	/* source IP, if specified */
 	if (filter_bm & PBR_FILTER_SRC_IP) {
 		req->frh.src_len = src_ip->prefixlen;
-		addattr_l(&req->n, buflen, FRA_SRC, &src_ip->u.prefix, bytelen);
+		if (!nl_attr_put(&req->n, buflen, FRA_SRC, &src_ip->u.prefix,
+				 bytelen))
+			return 0;
 	}
 
 	/* destination IP, if specified */
 	if (filter_bm & PBR_FILTER_DST_IP) {
 		req->frh.dst_len = dst_ip->prefixlen;
-		addattr_l(&req->n, buflen, FRA_DST, &dst_ip->u.prefix, bytelen);
+		if (!nl_attr_put(&req->n, buflen, FRA_DST, &dst_ip->u.prefix,
+				 bytelen))
+			return 0;
 	}
 
 	/* fwmark, if specified */
-	if (filter_bm & PBR_FILTER_FWMARK)
-		addattr32(&req->n, buflen, FRA_FWMARK, fwmark);
+	if (filter_bm & PBR_FILTER_FWMARK) {
+		if (!nl_attr_put32(&req->n, buflen, FRA_FWMARK, fwmark))
+			return 0;
+	}
+
+	/* dsfield, if specified */
+	if (filter_bm & PBR_FILTER_DSFIELD)
+		req->frh.tos = dsfield;
 
 	/* Route table to use to forward, if filter criteria matches. */
 	if (table < 256)
 		req->frh.table = table;
 	else {
 		req->frh.table = RT_TABLE_UNSPEC;
-		addattr32(&req->n, buflen, FRA_TABLE, table);
+		if (!nl_attr_put32(&req->n, buflen, FRA_TABLE, table))
+			return 0;
 	}
 
 	if (IS_ZEBRA_DEBUG_KERNEL)
 		zlog_debug(
-			"Tx %s family %s IF %s(%u) Pref %u Fwmark %u Src %s Dst %s Table %u",
+			"Tx %s family %s IF %s Pref %u Fwmark %u Src %pFX Dst %pFX Table %u",
 			nl_msg_type_to_str(cmd), nl_family_to_str(family),
-			ifname, dplane_ctx_get_ifindex(ctx), priority, fwmark,
-			prefix2str(src_ip, buf1, sizeof(buf1)),
-			prefix2str(dst_ip, buf2, sizeof(buf2)), table);
+			ifname, priority, fwmark, src_ip, dst_ip, table);
 
 	return NLMSG_ALIGN(req->n.nlmsg_len);
 }
 
-/* Install or uninstall specified rule for a specific interface.
- * Form netlink message and ship it.
- */
-static int
-netlink_rule_update_internal(int cmd, const struct zebra_dplane_ctx *ctx,
-			     uint32_t filter_bm, uint32_t priority,
-			     uint32_t table, const struct prefix *src_ip,
-			     const struct prefix *dst_ip, uint32_t fwmark)
+static ssize_t netlink_rule_msg_encoder(struct zebra_dplane_ctx *ctx, void *buf,
+					size_t buflen)
 {
-	char buf[NL_PKT_BUF_SIZE];
+	int cmd = RTM_NEWRULE;
 
-	netlink_rule_msg_encode(cmd, ctx, filter_bm, priority, table, src_ip,
-				dst_ip, fwmark, buf, sizeof(buf));
-	return netlink_talk_info(netlink_talk_filter, (void *)&buf,
-				 dplane_ctx_get_ns(ctx), 0);
-}
-/* Public functions */
-
-/*
- * Add, update or delete a rule from the
- * kernel, using info from a dataplane context.
- */
-enum zebra_dplane_result kernel_pbr_rule_update(struct zebra_dplane_ctx *ctx)
-{
-	enum dplane_op_e op;
-	int cmd;
-	int ret;
-
-	op = dplane_ctx_get_op(ctx);
-	if (op == DPLANE_OP_RULE_ADD || op == DPLANE_OP_RULE_UPDATE)
-		cmd = RTM_NEWRULE;
-	else if (op == DPLANE_OP_RULE_DELETE)
+	if (dplane_ctx_get_op(ctx) == DPLANE_OP_RULE_DELETE)
 		cmd = RTM_DELRULE;
-	else {
-		flog_err(
-			EC_ZEBRA_PBR_RULE_UPDATE,
-			"Context received for kernel rule update with incorrect OP code (%u)",
-			op);
-		return ZEBRA_DPLANE_REQUEST_FAILURE;
-	}
 
-	ret = netlink_rule_update_internal(
+	return netlink_rule_msg_encode(
 		cmd, ctx, dplane_ctx_rule_get_filter_bm(ctx),
 		dplane_ctx_rule_get_priority(ctx),
 		dplane_ctx_rule_get_table(ctx), dplane_ctx_rule_get_src_ip(ctx),
 		dplane_ctx_rule_get_dst_ip(ctx),
-		dplane_ctx_rule_get_fwmark(ctx));
+		dplane_ctx_rule_get_fwmark(ctx),
+		dplane_ctx_rule_get_dsfield(ctx), buf, buflen);
+}
+
+static ssize_t netlink_oldrule_msg_encoder(struct zebra_dplane_ctx *ctx,
+					   void *buf, size_t buflen)
+{
+	return netlink_rule_msg_encode(
+		RTM_DELRULE, ctx, dplane_ctx_rule_get_old_filter_bm(ctx),
+		dplane_ctx_rule_get_old_priority(ctx),
+		dplane_ctx_rule_get_old_table(ctx),
+		dplane_ctx_rule_get_old_src_ip(ctx),
+		dplane_ctx_rule_get_old_dst_ip(ctx),
+		dplane_ctx_rule_get_old_fwmark(ctx),
+		dplane_ctx_rule_get_old_dsfield(ctx), buf, buflen);
+}
+
+/* Public functions */
+
+enum netlink_msg_status
+netlink_put_rule_update_msg(struct nl_batch *bth, struct zebra_dplane_ctx *ctx)
+{
+	enum dplane_op_e op;
+	enum netlink_msg_status ret;
+
+	op = dplane_ctx_get_op(ctx);
+	if (!(op == DPLANE_OP_RULE_ADD || op == DPLANE_OP_RULE_UPDATE
+	      || op == DPLANE_OP_RULE_DELETE)) {
+		flog_err(
+			EC_ZEBRA_PBR_RULE_UPDATE,
+			"Context received for kernel rule update with incorrect OP code (%u)",
+			op);
+		return FRR_NETLINK_ERROR;
+	}
+
+	ret = netlink_batch_add_msg(bth, ctx, netlink_rule_msg_encoder, false);
 
 	/**
 	 * Delete the old one.
@@ -184,18 +210,10 @@ enum zebra_dplane_result kernel_pbr_rule_update(struct zebra_dplane_ctx *ctx)
 	 * Don't care about this result right?
 	 */
 	if (op == DPLANE_OP_RULE_UPDATE)
-		netlink_rule_update_internal(
-			RTM_DELRULE, ctx,
-			dplane_ctx_rule_get_old_filter_bm(ctx),
-			dplane_ctx_rule_get_old_priority(ctx),
-			dplane_ctx_rule_get_old_table(ctx),
-			dplane_ctx_rule_get_old_src_ip(ctx),
-			dplane_ctx_rule_get_old_dst_ip(ctx),
-			dplane_ctx_rule_get_old_fwmark(ctx));
+		netlink_batch_add_msg(bth, ctx, netlink_oldrule_msg_encoder,
+				      true);
 
-
-	return (ret == 0 ? ZEBRA_DPLANE_REQUEST_SUCCESS
-			 : ZEBRA_DPLANE_REQUEST_FAILURE);
+	return ret;
 }
 
 /*
@@ -217,8 +235,6 @@ int netlink_rule_change(struct nlmsghdr *h, ns_id_t ns_id, int startup)
 	int len;
 	char *ifname;
 	struct zebra_pbr_rule rule = {};
-	char buf1[PREFIX_STRLEN];
-	char buf2[PREFIX_STRLEN];
 	uint8_t proto = 0;
 
 	/* Basic validation followed by extracting attributes. */
@@ -235,7 +251,16 @@ int netlink_rule_change(struct nlmsghdr *h, ns_id_t ns_id, int startup)
 	}
 
 	frh = NLMSG_DATA(h);
+
 	if (frh->family != AF_INET && frh->family != AF_INET6) {
+		if (frh->family == RTNL_FAMILY_IPMR
+		    || frh->family == RTNL_FAMILY_IP6MR) {
+			if (IS_ZEBRA_DEBUG_KERNEL)
+				zlog_debug(
+					"Received rule netlink that we are ignoring for family %u, rule change: %u",
+					frh->family, h->nlmsg_type);
+			return 0;
+		}
 		flog_warn(
 			EC_ZEBRA_NETLINK_INVALID_AF,
 			"Invalid address family: %u received from kernel rule change: %u",
@@ -301,17 +326,14 @@ int netlink_rule_change(struct nlmsghdr *h, ns_id_t ns_id, int startup)
 			ret = dplane_pbr_rule_delete(&rule);
 
 			zlog_debug(
-				"%s: %s leftover rule: family %s IF %s(%u) Pref %u Src %s Dst %s Table %u",
+				"%s: %s leftover rule: family %s IF %s Pref %u Src %pFX Dst %pFX Table %u",
 				__func__,
 				((ret == ZEBRA_DPLANE_REQUEST_FAILURE)
 					 ? "Failed to remove"
 					 : "Removed"),
 				nl_family_to_str(frh->family), rule.ifname,
-				rule.rule.ifindex, rule.rule.priority,
-				prefix2str(&rule.rule.filter.src_ip, buf1,
-					   sizeof(buf1)),
-				prefix2str(&rule.rule.filter.dst_ip, buf2,
-					   sizeof(buf2)),
+				rule.rule.priority, &rule.rule.filter.src_ip,
+				&rule.rule.filter.dst_ip,
 				rule.rule.action.table);
 		}
 
@@ -327,15 +349,11 @@ int netlink_rule_change(struct nlmsghdr *h, ns_id_t ns_id, int startup)
 
 	if (IS_ZEBRA_DEBUG_KERNEL)
 		zlog_debug(
-			"Rx %s family %s IF %s(%u) Pref %u Src %s Dst %s Table %u",
+			"Rx %s family %s IF %s Pref %u Src %pFX Dst %pFX Table %u",
 			nl_msg_type_to_str(h->nlmsg_type),
 			nl_family_to_str(frh->family), rule.ifname,
-			rule.rule.ifindex, rule.rule.priority,
-			prefix2str(&rule.rule.filter.src_ip, buf1,
-				   sizeof(buf1)),
-			prefix2str(&rule.rule.filter.dst_ip, buf2,
-				   sizeof(buf2)),
-			rule.rule.action.table);
+			rule.rule.priority, &rule.rule.filter.src_ip,
+			&rule.rule.filter.dst_ip, rule.rule.action.table);
 
 	return kernel_pbr_rule_del(&rule);
 }

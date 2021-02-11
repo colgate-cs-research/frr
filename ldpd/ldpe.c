@@ -27,6 +27,7 @@
 #include "control.h"
 #include "log.h"
 #include "ldp_debug.h"
+#include "rlfa.h"
 
 #include <lib/log.h>
 #include "memory.h"
@@ -49,6 +50,7 @@ struct ldpd_conf	*leconf;
 struct ldpd_sysdep	 sysdep;
 #endif
 
+static struct imsgev    iev_main_data;
 static struct imsgev	*iev_main, *iev_main_sync;
 static struct imsgev	*iev_lde;
 #ifdef __OpenBSD__
@@ -124,8 +126,8 @@ ldpe(void)
 		        &iev_main->ev_read);
 	iev_main->handler_write = ldp_write_handler;
 
-	if ((iev_main_sync = calloc(1, sizeof(struct imsgev))) == NULL)
-		fatal(NULL);
+	memset(&iev_main_data, 0, sizeof(iev_main_data));
+	iev_main_sync = &iev_main_data;
 	imsg_init(&iev_main_sync->ibuf, LDPD_FD_SYNC);
 
 	/* create base configuration */
@@ -208,7 +210,7 @@ ldpe_shutdown(void)
 
 #ifdef __OpenBSD__
 	if (sysdep.no_pfkey == 0) {
-		THREAD_READ_OFF(pfkey_ev);
+		thread_cancel(&pfkey_ev);
 		close(global.pfkeysock);
 	}
 #endif
@@ -231,10 +233,12 @@ ldpe_shutdown(void)
 	if (iev_lde)
 		free(iev_lde);
 	free(iev_main);
-	free(iev_main_sync);
 	free(pkt_ptr);
 
 	log_info("ldp engine exiting");
+
+	zlog_fini();
+
 	exit(0);
 }
 
@@ -294,7 +298,12 @@ ldpe_dispatch_main(struct thread *thread)
 #endif
 	int			 n, shut = 0;
 	struct ldp_access       *laccess;
-	
+	struct ldp_igp_sync_if_state_req *ldp_sync_if_state_req;
+	struct ldp_rlfa_node	 *rnode, *rntmp;
+	struct ldp_rlfa_client	 *rclient;
+	struct zapi_rlfa_request *rlfa_req;
+	struct zapi_rlfa_igp	 *rlfa_igp;
+
 	iev->ev_read = NULL;
 
 	if ((n = imsg_read(ibuf)) == -1 && errno != EAGAIN)
@@ -352,13 +361,11 @@ ldpe_dispatch_main(struct thread *thread)
 			break;
 		case IMSG_SOCKET_IPC:
 			if (iev_lde) {
-				log_warnx("%s: received unexpected imsg fd "
-				    "to lde", __func__);
+				log_warnx("%s: received unexpected imsg fd to lde", __func__);
 				break;
 			}
 			if ((fd = imsg.fd) == -1) {
-				log_warnx("%s: expected to receive imsg fd to "
-				    "lde but didn't receive any", __func__);
+				log_warnx("%s: expected to receive imsg fd to lde but didn't receive any", __func__);
 				break;
 			}
 
@@ -558,6 +565,53 @@ ldpe_dispatch_main(struct thread *thread)
 			ldpe_check_filter_af(AF_INET6, &leconf->ipv6,
 				laccess->name);
 			break;
+		case IMSG_LDP_SYNC_IF_STATE_REQUEST:
+			if (imsg.hdr.len != IMSG_HEADER_SIZE +
+			    sizeof(struct ldp_igp_sync_if_state_req)) {
+				log_warnx("%s: wrong imsg len", __func__);
+				break;
+			}
+			ldp_sync_if_state_req = imsg.data;
+			ldp_sync_fsm_state_req(ldp_sync_if_state_req);
+			break;
+		case IMSG_RLFA_REG:
+			if (imsg.hdr.len != IMSG_HEADER_SIZE +
+			    sizeof(struct zapi_rlfa_request)) {
+				log_warnx("%s: wrong imsg len", __func__);
+				break;
+			}
+			rlfa_req = imsg.data;
+
+			rnode = rlfa_node_find(&rlfa_req->destination,
+					       rlfa_req->pq_address);
+			if (!rnode)
+				rnode = rlfa_node_new(&rlfa_req->destination,
+						      rlfa_req->pq_address);
+			rclient = rlfa_client_find(rnode, &rlfa_req->igp);
+			if (rclient)
+				/* RLFA already registered - do nothing */
+				break;
+			rclient = rlfa_client_new(rnode, &rlfa_req->igp);
+			ldpe_rlfa_init(rclient);
+			break;
+		case IMSG_RLFA_UNREG_ALL:
+			if (imsg.hdr.len != IMSG_HEADER_SIZE +
+			    sizeof(struct zapi_rlfa_igp)) {
+				log_warnx("%s: wrong imsg len", __func__);
+				break;
+			}
+			rlfa_igp = imsg.data;
+
+			RB_FOREACH_SAFE (rnode, ldp_rlfa_node_head,
+					 &rlfa_node_tree, rntmp) {
+				rclient = rlfa_client_find(rnode, rlfa_igp);
+				if (!rclient)
+					continue;
+
+				ldpe_rlfa_exit(rclient);
+				rlfa_client_del(rclient);
+			}
+			break;
 		default:
 			log_debug("ldpe_dispatch_main: error handling imsg %d",
 			    imsg.hdr.type);
@@ -569,8 +623,8 @@ ldpe_dispatch_main(struct thread *thread)
 		imsg_event_add(iev);
 	else {
 		/* this pipe is dead, so remove the event handlers and exit */
-		THREAD_READ_OFF(iev->ev_read);
-		THREAD_WRITE_OFF(iev->ev_write);
+		thread_cancel(&iev->ev_read);
+		thread_cancel(&iev->ev_write);
 		ldpe_shutdown();
 	}
 
@@ -613,11 +667,8 @@ ldpe_dispatch_lde(struct thread *thread)
 			map = imsg.data;
 
 			nbr = nbr_find_peerid(imsg.hdr.peerid);
-			if (nbr == NULL) {
-				log_debug("ldpe_dispatch_lde: cannot find "
-				    "neighbor");
+			if (nbr == NULL)
 				break;
-			}
 			if (nbr->state != NBR_STA_OPER)
 				break;
 
@@ -641,11 +692,8 @@ ldpe_dispatch_lde(struct thread *thread)
 		case IMSG_REQUEST_ADD_END:
 		case IMSG_WITHDRAW_ADD_END:
 			nbr = nbr_find_peerid(imsg.hdr.peerid);
-			if (nbr == NULL) {
-				log_debug("ldpe_dispatch_lde: cannot find "
-				    "neighbor");
+			if (nbr == NULL)
 				break;
-			}
 			if (nbr->state != NBR_STA_OPER)
 				break;
 
@@ -676,8 +724,7 @@ ldpe_dispatch_lde(struct thread *thread)
 
 			nbr = nbr_find_peerid(imsg.hdr.peerid);
 			if (nbr == NULL) {
-				log_debug("ldpe_dispatch_lde: cannot find "
-				    "neighbor");
+				log_debug("ldpe_dispatch_lde: cannot find neighbor");
 				break;
 			}
 			if (nbr->state != NBR_STA_OPER)
@@ -697,8 +744,7 @@ ldpe_dispatch_lde(struct thread *thread)
 		case IMSG_NBR_SHUTDOWN:
 			nbr = nbr_find_peerid(imsg.hdr.peerid);
 			if (nbr == NULL) {
-				log_debug("ldpe_dispatch_lde: cannot find "
-				    "neighbor");
+				log_debug("ldpe_dispatch_lde: cannot find neighbor");
 				break;
 			}
 			if (nbr->state != NBR_STA_OPER)
@@ -716,8 +762,8 @@ ldpe_dispatch_lde(struct thread *thread)
 		imsg_event_add(iev);
 	else {
 		/* this pipe is dead, so remove the event handlers and exit */
-		THREAD_READ_OFF(iev->ev_read);
-		THREAD_WRITE_OFF(iev->ev_write);
+		thread_cancel(&iev->ev_read);
+		thread_cancel(&iev->ev_write);
 		ldpe_shutdown();
 	}
 
@@ -775,14 +821,14 @@ ldpe_close_sockets(int af)
 	af_global = ldp_af_global_get(&global, af);
 
 	/* discovery socket */
-	THREAD_READ_OFF(af_global->disc_ev);
+	thread_cancel(&af_global->disc_ev);
 	if (af_global->ldp_disc_socket != -1) {
 		close(af_global->ldp_disc_socket);
 		af_global->ldp_disc_socket = -1;
 	}
 
 	/* extended discovery socket */
-	THREAD_READ_OFF(af_global->edisc_ev);
+	thread_cancel(&af_global->edisc_ev);
 	if (af_global->ldp_edisc_socket != -1) {
 		close(af_global->ldp_edisc_socket);
 		af_global->ldp_edisc_socket = -1;
@@ -977,6 +1023,20 @@ ldpe_nbr_ctl(struct ctl_conn *c)
 
 		imsg_compose_event(&c->iev, IMSG_CTL_SHOW_NBR_END, 0, 0, -1,
 		    NULL, 0);
+	}
+	imsg_compose_event(&c->iev, IMSG_CTL_END, 0, 0, -1, NULL, 0);
+}
+
+void
+ldpe_ldp_sync_ctl(struct ctl_conn *c)
+{
+	struct iface		*iface;
+	struct ctl_ldp_sync	*ictl;
+
+	RB_FOREACH(iface, iface_head, &leconf->iface_tree) {
+		ictl = ldp_sync_to_ctl(iface);
+		imsg_compose_event(&c->iev, IMSG_CTL_SHOW_LDP_SYNC,
+			0, 0, -1, ictl, sizeof(struct ctl_ldp_sync));
 	}
 	imsg_compose_event(&c->iev, IMSG_CTL_END, 0, 0, -1, NULL, 0);
 }

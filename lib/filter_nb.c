@@ -24,35 +24,43 @@
 
 #include "lib/northbound.h"
 #include "lib/prefix.h"
+#include "lib/printfrr.h"
 
 #include "lib/filter.h"
 #include "lib/plist.h"
 #include "lib/plist_int.h"
+#include "lib/routemap.h"
 
 /* Helper function. */
-static in_addr_t
-ipv4_network_addr(in_addr_t hostaddr, int masklen)
+static void acl_notify_route_map(struct access_list *acl, int route_map_event)
 {
-	struct in_addr mask;
+	switch (route_map_event) {
+	case RMAP_EVENT_FILTER_ADDED:
+		if (acl->master->add_hook)
+			(*acl->master->add_hook)(acl);
+		break;
+	case RMAP_EVENT_FILTER_DELETED:
+		if (acl->master->delete_hook)
+			(*acl->master->delete_hook)(acl);
+		break;
+	}
 
-	masklen2ip(masklen, &mask);
-	return hostaddr & mask.s_addr;
+	route_map_notify_dependencies(acl->name, route_map_event);
 }
 
-static enum nb_error
-prefix_list_length_validate(const struct lyd_node *dnode)
+static enum nb_error prefix_list_length_validate(struct nb_cb_modify_args *args)
 {
-	int type = yang_dnode_get_enum(dnode, "../../type");
+	int type = yang_dnode_get_enum(args->dnode, "../../type");
 	const char *xpath_le = NULL, *xpath_ge = NULL;
 	struct prefix p;
 	uint8_t le, ge;
 
 	if (type == YPLT_IPV4) {
-		yang_dnode_get_prefix(&p, dnode, "../ipv4-prefix");
+		yang_dnode_get_prefix(&p, args->dnode, "../ipv4-prefix");
 		xpath_le = "../ipv4-prefix-length-lesser-or-equal";
 		xpath_ge = "../ipv4-prefix-length-greater-or-equal";
 	} else {
-		yang_dnode_get_prefix(&p, dnode, "../ipv6-prefix");
+		yang_dnode_get_prefix(&p, args->dnode, "../ipv6-prefix");
 		xpath_le = "../ipv6-prefix-length-lesser-or-equal";
 		xpath_ge = "../ipv6-prefix-length-greater-or-equal";
 	}
@@ -61,20 +69,19 @@ prefix_list_length_validate(const struct lyd_node *dnode)
 	 * Check rule:
 	 * prefix length <= le.
 	 */
-	if (yang_dnode_exists(dnode, xpath_le)) {
-		le = yang_dnode_get_uint8(dnode, xpath_le);
+	if (yang_dnode_exists(args->dnode, xpath_le)) {
+		le = yang_dnode_get_uint8(args->dnode, xpath_le);
 		if (p.prefixlen > le)
 			goto log_and_fail;
-
 	}
 
 	/*
 	 * Check rule:
-	 * prefix length < ge.
+	 * prefix length <= ge.
 	 */
-	if (yang_dnode_exists(dnode, xpath_ge)) {
-		ge = yang_dnode_get_uint8(dnode, xpath_ge);
-		if (p.prefixlen >= ge)
+	if (yang_dnode_exists(args->dnode, xpath_ge)) {
+		ge = yang_dnode_get_uint8(args->dnode, xpath_ge);
+		if (p.prefixlen > ge)
 			goto log_and_fail;
 	}
 
@@ -82,19 +89,21 @@ prefix_list_length_validate(const struct lyd_node *dnode)
 	 * Check rule:
 	 * ge <= le.
 	 */
-	if (yang_dnode_exists(dnode, xpath_le) &&
-	    yang_dnode_exists(dnode, xpath_ge)) {
-		le = yang_dnode_get_uint8(dnode, xpath_le);
-		ge = yang_dnode_get_uint8(dnode, xpath_ge);
+	if (yang_dnode_exists(args->dnode, xpath_le)
+	    && yang_dnode_exists(args->dnode, xpath_ge)) {
+		le = yang_dnode_get_uint8(args->dnode, xpath_le);
+		ge = yang_dnode_get_uint8(args->dnode, xpath_ge);
 		if (ge > le)
 			goto log_and_fail;
 	}
 
 	return NB_OK;
 
-  log_and_fail:
-	zlog_info("prefix-list: invalid prefix range for %pFX: "
-		  "Make sure that mask length < ge <= le", &p);
+log_and_fail:
+	snprintfrr(
+		args->errmsg, args->errmsg_len,
+		"Invalid prefix range for %pFX: Make sure that mask length <= ge <= le",
+		&p);
 	return NB_ERR_VALIDATION;
 }
 
@@ -111,373 +120,231 @@ static void prefix_list_entry_set_empty(struct prefix_list_entry *ple)
 	ple->le = 0;
 }
 
-/*
- * XPath: /frr-filter:lib/access-list-legacy
+/**
+ * Unsets the cisco style rule for addresses so it becomes disabled (the
+ * equivalent of setting: `0.0.0.0/32`).
+ *
+ * \param addr address part.
+ * \param mask mask part.
  */
-static int lib_access_list_legacy_create(struct nb_cb_create_args *args)
+static void cisco_unset_addr_mask(struct in_addr *addr, struct in_addr *mask)
 {
-	struct access_list *acl;
-	const char *acl_name;
-
-	if (args->event != NB_EV_APPLY)
-		return NB_OK;
-
-	acl_name = yang_dnode_get_string(args->dnode, "./number");
-	acl = access_list_get(AFI_IP, acl_name);
-	nb_running_set_entry(args->dnode, acl);
-
-	return NB_OK;
+	addr->s_addr = INADDR_ANY;
+	mask->s_addr = CISCO_BIN_HOST_WILDCARD_MASK;
 }
 
-static int lib_access_list_legacy_destroy(struct nb_cb_destroy_args *args)
+static int _acl_is_dup(const struct lyd_node *dnode, void *arg)
 {
-	struct access_master *am;
-	struct access_list *acl;
+	struct acl_dup_args *ada = arg;
+	int idx;
 
-	if (args->event != NB_EV_APPLY)
-		return NB_OK;
+	/* This entry is the caller, so skip it. */
+	if (ada->ada_entry_dnode
+	    && ada->ada_entry_dnode == dnode)
+		return YANG_ITER_CONTINUE;
 
-	acl = nb_running_unset_entry(args->dnode);
-	am = acl->master;
-	if (am->delete_hook)
-		am->delete_hook(acl);
+	/* Check if all values match. */
+	for (idx = 0; idx < ADA_MAX_VALUES; idx++) {
+		/* No more values. */
+		if (ada->ada_xpath[idx] == NULL)
+			break;
 
-	access_list_delete(acl);
+		/* Not same type, just skip it. */
+		if (!yang_dnode_exists(dnode, ada->ada_xpath[idx]))
+			return YANG_ITER_CONTINUE;
 
-	return NB_OK;
+		/* Check if different value. */
+		if (strcmp(yang_dnode_get_string(dnode, ada->ada_xpath[idx]),
+			   ada->ada_value[idx]))
+			return YANG_ITER_CONTINUE;
+	}
+
+	ada->ada_found = true;
+
+	return YANG_ITER_STOP;
 }
 
-/*
- * XPath: /frr-filter:lib/access-list-legacy/remark
- */
-static int lib_access_list_legacy_remark_modify(struct nb_cb_modify_args *args)
+bool acl_is_dup(const struct lyd_node *dnode, struct acl_dup_args *ada)
 {
-	struct access_list *acl;
-	const char *remark;
+	ada->ada_found = false;
 
-	if (args->event != NB_EV_APPLY)
-		return NB_OK;
+	yang_dnode_iterate(
+		_acl_is_dup, ada, dnode,
+		"/frr-filter:lib/access-list[type='%s'][name='%s']/entry",
+		ada->ada_type, ada->ada_name);
 
-	acl = nb_running_get_entry(args->dnode, NULL, true);
-	if (acl->remark)
-		XFREE(MTYPE_TMP, acl->remark);
-
-	remark = yang_dnode_get_string(args->dnode, NULL);
-	acl->remark = XSTRDUP(MTYPE_TMP, remark);
-
-	return NB_OK;
+	return ada->ada_found;
 }
 
-static int
-lib_access_list_legacy_remark_destroy(struct nb_cb_destroy_args *args)
+static bool acl_cisco_is_dup(const struct lyd_node *dnode)
 {
-	struct access_list *acl;
+	const struct lyd_node *entry_dnode =
+		yang_dnode_get_parent(dnode, "entry");
+	struct acl_dup_args ada = {};
+	int idx = 0, arg_idx = 0;
+	static const char *cisco_entries[] = {
+		"./host",
+		"./network/address",
+		"./network/mask",
+		"./source-any",
+		"./destination-host",
+		"./destination-network/address",
+		"./destination-network/mask",
+		"./destination-any",
+		NULL
+	};
 
-	if (args->event != NB_EV_APPLY)
-		return NB_OK;
+	/* Initialize. */
+	ada.ada_type = "ipv4";
+	ada.ada_name = yang_dnode_get_string(entry_dnode, "../name");
+	ada.ada_entry_dnode = entry_dnode;
 
-	acl = nb_running_get_entry(args->dnode, NULL, true);
-	if (acl->remark)
-		XFREE(MTYPE_TMP, acl->remark);
+	/* Load all values/XPaths. */
+	while (cisco_entries[idx] != NULL) {
+		if (!yang_dnode_exists(entry_dnode, cisco_entries[idx])) {
+			idx++;
+			continue;
+		}
 
-	return NB_OK;
+		ada.ada_xpath[arg_idx] = cisco_entries[idx];
+		ada.ada_value[arg_idx] =
+			yang_dnode_get_string(entry_dnode, cisco_entries[idx]);
+		arg_idx++;
+		idx++;
+	}
+
+	return acl_is_dup(entry_dnode, &ada);
 }
 
-/*
- * XPath: /frr-filter:lib/access-list-legacy/entry
- */
-static int lib_access_list_legacy_entry_create(struct nb_cb_create_args *args)
+static bool acl_zebra_is_dup(const struct lyd_node *dnode,
+			     enum yang_access_list_type type)
 {
-	struct filter_cisco *fc;
-	struct access_list *acl;
-	struct filter *f;
-	uint32_t aclno;
+	const struct lyd_node *entry_dnode =
+		yang_dnode_get_parent(dnode, "entry");
+	struct acl_dup_args ada = {};
+	int idx = 0, arg_idx = 0;
+	static const char *zebra_entries[] = {
+		"./ipv4-prefix",
+		"./ipv4-exact-match",
+		"./ipv6-prefix",
+		"./ipv6-exact-match",
+		"./mac",
+		"./any",
+		NULL
+	};
 
-	/* TODO: validate `filter_lookup_cisco` returns NULL. */
+	/* Initialize. */
+	switch (type) {
+	case YALT_IPV4:
+		ada.ada_type = "ipv4";
+		break;
+	case YALT_IPV6:
+		ada.ada_type = "ipv6";
+		break;
+	case YALT_MAC:
+		ada.ada_type = "mac";
+		break;
+	}
+	ada.ada_name = yang_dnode_get_string(entry_dnode, "../name");
+	ada.ada_entry_dnode = entry_dnode;
 
-	if (args->event != NB_EV_APPLY)
-		return NB_OK;
+	/* Load all values/XPaths. */
+	while (zebra_entries[idx] != NULL) {
+		if (!yang_dnode_exists(entry_dnode, zebra_entries[idx])) {
+			idx++;
+			continue;
+		}
 
-	aclno = yang_dnode_get_uint16(args->dnode, "../number");
+		ada.ada_xpath[arg_idx] = zebra_entries[idx];
+		ada.ada_value[arg_idx] =
+			yang_dnode_get_string(entry_dnode, zebra_entries[idx]);
+		arg_idx++;
+		idx++;
+	}
 
-	f = filter_new();
-	f->cisco = 1;
-	f->seq = yang_dnode_get_uint32(args->dnode, "./sequence");
-	fc = &f->u.cfilter;
-	if ((aclno >= 1 && aclno <= 99) || (aclno >= 1300 && aclno <= 1999))
-		fc->extended = 0;
-	else
-		fc->extended = 1;
-
-	acl = nb_running_get_entry(args->dnode, NULL, true);
-	f->acl = acl;
-	access_list_filter_add(acl, f);
-	nb_running_set_entry(args->dnode, f);
-
-	return NB_OK;
+	return acl_is_dup(entry_dnode, &ada);
 }
 
-static int lib_access_list_legacy_entry_destroy(struct nb_cb_destroy_args *args)
+static int _plist_is_dup(const struct lyd_node *dnode, void *arg)
 {
-	struct access_list *acl;
-	struct filter *f;
+	struct plist_dup_args *pda = arg;
+	int idx;
 
-	if (args->event != NB_EV_APPLY)
-		return NB_OK;
+	/* This entry is the caller, so skip it. */
+	if (pda->pda_entry_dnode
+	    && pda->pda_entry_dnode == dnode)
+		return YANG_ITER_CONTINUE;
 
-	f = nb_running_unset_entry(args->dnode);
-	acl = f->acl;
-	access_list_filter_delete(acl, f);
+	/* Check if all values match. */
+	for (idx = 0; idx < PDA_MAX_VALUES; idx++) {
+		/* No more values. */
+		if (pda->pda_xpath[idx] == NULL)
+			break;
 
-	return NB_OK;
+		/* Not same type, just skip it. */
+		if (!yang_dnode_exists(dnode, pda->pda_xpath[idx]))
+			return YANG_ITER_CONTINUE;
+
+		/* Check if different value. */
+		if (strcmp(yang_dnode_get_string(dnode, pda->pda_xpath[idx]),
+			   pda->pda_value[idx]))
+			return YANG_ITER_CONTINUE;
+	}
+
+	pda->pda_found = true;
+
+	return YANG_ITER_STOP;
 }
 
-/*
- * XPath: /frr-filter:lib/access-list-legacy/entry/action
- */
-static int
-lib_access_list_legacy_entry_action_modify(struct nb_cb_modify_args *args)
+bool plist_is_dup(const struct lyd_node *dnode, struct plist_dup_args *pda)
 {
-	const char *filter_type;
-	struct filter *f;
+	pda->pda_found = false;
 
-	if (args->event != NB_EV_APPLY)
-		return NB_OK;
+	yang_dnode_iterate(
+		_plist_is_dup, pda, dnode,
+		"/frr-filter:lib/prefix-list[type='%s'][name='%s']/entry",
+		pda->pda_type, pda->pda_name);
 
-	f = nb_running_get_entry(args->dnode, NULL, true);
-	filter_type = yang_dnode_get_string(args->dnode, NULL);
-	if (strcmp(filter_type, "permit") == 0)
-		f->type = FILTER_PERMIT;
-	else
-		f->type = FILTER_DENY;
-
-	return NB_OK;
+	return pda->pda_found;
 }
 
-/*
- * XPath: /frr-filter:lib/access-list-legacy/entry/host
- */
-static int
-lib_access_list_legacy_entry_host_modify(struct nb_cb_modify_args *args)
+static bool plist_is_dup_nb(const struct lyd_node *dnode)
 {
-	struct filter_cisco *fc;
-	struct filter *f;
+	const struct lyd_node *entry_dnode =
+		yang_dnode_get_parent(dnode, "entry");
+	struct plist_dup_args pda = {};
+	int idx = 0, arg_idx = 0;
+	static const char *entries[] = {
+		"./ipv4-prefix",
+		"./ipv4-prefix-length-greater-or-equal",
+		"./ipv4-prefix-length-lesser-or-equal",
+		"./ipv6-prefix",
+		"./ipv6-prefix-length-greater-or-equal",
+		"./ipv6-prefix-length-lesser-or-equal",
+		"./any",
+		NULL
+	};
 
-	if (args->event != NB_EV_APPLY)
-		return NB_OK;
+	/* Initialize. */
+	pda.pda_type = yang_dnode_get_string(entry_dnode, "../type");
+	pda.pda_name = yang_dnode_get_string(entry_dnode, "../name");
+	pda.pda_entry_dnode = entry_dnode;
 
-	f = nb_running_get_entry(args->dnode, NULL, true);
-	fc = &f->u.cfilter;
-	yang_dnode_get_ipv4(&fc->addr, args->dnode, NULL);
-	fc->addr_mask.s_addr = INADDR_ANY;
+	/* Load all values/XPaths. */
+	while (entries[idx] != NULL) {
+		if (!yang_dnode_exists(entry_dnode, entries[idx])) {
+			idx++;
+			continue;
+		}
 
-	return NB_OK;
-}
+		pda.pda_xpath[arg_idx] = entries[idx];
+		pda.pda_value[arg_idx] =
+			yang_dnode_get_string(entry_dnode, entries[idx]);
+		arg_idx++;
+		idx++;
+	}
 
-static int
-lib_access_list_legacy_entry_host_destroy(struct nb_cb_destroy_args *args)
-{
-	struct filter_cisco *fc;
-	struct filter *f;
-
-	if (args->event != NB_EV_APPLY)
-		return NB_OK;
-
-	f = nb_running_get_entry(args->dnode, NULL, true);
-	fc = &f->u.cfilter;
-	fc->addr.s_addr = INADDR_ANY;
-	fc->addr_mask.s_addr = INADDR_NONE;
-
-	return NB_OK;
-}
-
-/*
- * XPath: /frr-filter:lib/access-list-legacy/entry/network
- */
-static int
-lib_access_list_legacy_entry_network_modify(struct nb_cb_modify_args *args)
-{
-	struct filter_cisco *fc;
-	struct filter *f;
-	struct prefix p;
-
-	if (args->event != NB_EV_APPLY)
-		return NB_OK;
-
-	f = nb_running_get_entry(args->dnode, NULL, true);
-	fc = &f->u.cfilter;
-	yang_dnode_get_prefix(&p, args->dnode, NULL);
-	fc->addr.s_addr = ipv4_network_addr(p.u.prefix4.s_addr, p.prefixlen);
-	masklen2ip(p.prefixlen, &fc->addr_mask);
-
-	return NB_OK;
-}
-
-static int
-lib_access_list_legacy_entry_network_destroy(struct nb_cb_destroy_args *args)
-{
-	struct filter_cisco *fc;
-	struct filter *f;
-
-	if (args->event != NB_EV_APPLY)
-		return NB_OK;
-
-	f = nb_running_get_entry(args->dnode, NULL, true);
-	fc = &f->u.cfilter;
-	fc->addr.s_addr = INADDR_ANY;
-	fc->addr_mask.s_addr = INADDR_NONE;
-
-	return NB_OK;
-}
-
-/*
- * XPath: /frr-filter:lib/access-list-legacy/entry/any
- */
-static int
-lib_access_list_legacy_entry_any_create(struct nb_cb_create_args *args)
-{
-	struct filter_cisco *fc;
-	struct filter *f;
-
-	if (args->event != NB_EV_APPLY)
-		return NB_OK;
-
-	f = nb_running_get_entry(args->dnode, NULL, true);
-	fc = &f->u.cfilter;
-	fc->addr.s_addr = INADDR_ANY;
-	fc->addr_mask.s_addr = INADDR_NONE;
-
-	return NB_OK;
-}
-
-static int
-lib_access_list_legacy_entry_any_destroy(struct nb_cb_destroy_args *args)
-{
-	struct filter_cisco *fc;
-	struct filter *f;
-
-	if (args->event != NB_EV_APPLY)
-		return NB_OK;
-
-	f = nb_running_get_entry(args->dnode, NULL, true);
-	fc = &f->u.cfilter;
-	fc->addr.s_addr = INADDR_ANY;
-	fc->addr_mask.s_addr = INADDR_NONE;
-
-	return NB_OK;
-}
-
-/*
- * XPath: /frr-filter:lib/access-list-legacy/entry/destination-host
- */
-static int lib_access_list_legacy_entry_destination_host_modify(
-	struct nb_cb_modify_args *args)
-{
-	struct filter_cisco *fc;
-	struct filter *f;
-
-	if (args->event != NB_EV_APPLY)
-		return NB_OK;
-
-	f = nb_running_get_entry(args->dnode, NULL, true);
-	fc = &f->u.cfilter;
-	yang_dnode_get_ipv4(&fc->mask, args->dnode, NULL);
-	fc->mask_mask.s_addr = INADDR_ANY;
-
-	return NB_OK;
-}
-
-static int lib_access_list_legacy_entry_destination_host_destroy(
-	struct nb_cb_destroy_args *args)
-{
-	struct filter_cisco *fc;
-	struct filter *f;
-
-	if (args->event != NB_EV_APPLY)
-		return NB_OK;
-
-	f = nb_running_get_entry(args->dnode, NULL, true);
-	fc = &f->u.cfilter;
-	fc->mask.s_addr = INADDR_ANY;
-	fc->mask_mask.s_addr = INADDR_NONE;
-
-	return NB_OK;
-}
-
-/*
- * XPath: /frr-filter:lib/access-list-legacy/entry/destination-network
- */
-static int lib_access_list_legacy_entry_destination_network_modify(
-	struct nb_cb_modify_args *args)
-{
-	struct filter_cisco *fc;
-	struct filter *f;
-	struct prefix p;
-
-	if (args->event != NB_EV_APPLY)
-		return NB_OK;
-
-	f = nb_running_get_entry(args->dnode, NULL, true);
-	fc = &f->u.cfilter;
-	yang_dnode_get_prefix(&p, args->dnode, NULL);
-	fc->mask.s_addr = ipv4_network_addr(p.u.prefix4.s_addr, p.prefixlen);
-	masklen2ip(p.prefixlen, &fc->mask_mask);
-
-	return NB_OK;
-}
-
-static int lib_access_list_legacy_entry_destination_network_destroy(
-	struct nb_cb_destroy_args *args)
-{
-	struct filter_cisco *fc;
-	struct filter *f;
-
-	if (args->event != NB_EV_APPLY)
-		return NB_OK;
-
-	f = nb_running_get_entry(args->dnode, NULL, true);
-	fc = &f->u.cfilter;
-	fc->mask.s_addr = INADDR_ANY;
-	fc->mask_mask.s_addr = INADDR_NONE;
-
-	return NB_OK;
-}
-
-/*
- * XPath: /frr-filter:lib/access-list-legacy/entry/destination-any
- */
-static int lib_access_list_legacy_entry_destination_any_create(
-	struct nb_cb_create_args *args)
-{
-	struct filter_cisco *fc;
-	struct filter *f;
-
-	if (args->event != NB_EV_APPLY)
-		return NB_OK;
-
-	f = nb_running_get_entry(args->dnode, NULL, true);
-	fc = &f->u.cfilter;
-	fc->mask.s_addr = INADDR_ANY;
-	fc->mask_mask.s_addr = INADDR_NONE;
-
-	return NB_OK;
-}
-
-static int lib_access_list_legacy_entry_destination_any_destroy(
-	struct nb_cb_destroy_args *args)
-{
-	struct filter_cisco *fc;
-	struct filter *f;
-
-	if (args->event != NB_EV_APPLY)
-		return NB_OK;
-
-	f = nb_running_get_entry(args->dnode, NULL, true);
-	fc = &f->u.cfilter;
-	fc->mask.s_addr = INADDR_ANY;
-	fc->mask_mask.s_addr = INADDR_NONE;
-
-	return NB_OK;
+	return plist_is_dup(entry_dnode, &pda);
 }
 
 /*
@@ -531,14 +398,49 @@ static int lib_access_list_destroy(struct nb_cb_destroy_args *args)
 }
 
 /*
+ * XPath: /frr-filter:lib/access-list/remark
+ */
+static int lib_access_list_remark_modify(struct nb_cb_modify_args *args)
+{
+	struct access_list *acl;
+	const char *remark;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	acl = nb_running_get_entry(args->dnode, NULL, true);
+	if (acl->remark)
+		XFREE(MTYPE_TMP, acl->remark);
+
+	remark = yang_dnode_get_string(args->dnode, NULL);
+	acl->remark = XSTRDUP(MTYPE_TMP, remark);
+
+	return NB_OK;
+}
+
+static int
+lib_access_list_remark_destroy(struct nb_cb_destroy_args *args)
+{
+	struct access_list *acl;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	acl = nb_running_get_entry(args->dnode, NULL, true);
+	if (acl->remark)
+		XFREE(MTYPE_TMP, acl->remark);
+
+	return NB_OK;
+}
+
+
+/*
  * XPath: /frr-filter:lib/access-list/entry
  */
 static int lib_access_list_entry_create(struct nb_cb_create_args *args)
 {
 	struct access_list *acl;
 	struct filter *f;
-
-	/* TODO: validate `filter_lookup_zebra` returns NULL. */
 
 	if (args->event != NB_EV_APPLY)
 		return NB_OK;
@@ -570,6 +472,30 @@ static int lib_access_list_entry_destroy(struct nb_cb_destroy_args *args)
 }
 
 /*
+ * XPath: /frr-filter:lib/access-list/entry/action
+ */
+static int
+lib_access_list_entry_action_modify(struct nb_cb_modify_args *args)
+{
+	const char *filter_type;
+	struct filter *f;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	f = nb_running_get_entry(args->dnode, NULL, true);
+	filter_type = yang_dnode_get_string(args->dnode, NULL);
+	if (strcmp(filter_type, "permit") == 0)
+		f->type = FILTER_PERMIT;
+	else
+		f->type = FILTER_DENY;
+
+	acl_notify_route_map(f->acl, RMAP_EVENT_FILTER_ADDED);
+
+	return NB_OK;
+}
+
+/*
  * XPath: /frr-filter:lib/access-list/entry/ipv4-prefix
  */
 static int
@@ -578,12 +504,28 @@ lib_access_list_entry_ipv4_prefix_modify(struct nb_cb_modify_args *args)
 	struct filter_zebra *fz;
 	struct filter *f;
 
+	/* Don't allow duplicated values. */
+	if (args->event == NB_EV_VALIDATE) {
+		if (acl_zebra_is_dup(
+			    args->dnode,
+			    yang_dnode_get_enum(args->dnode, "../../type"))) {
+			snprintfrr(args->errmsg, args->errmsg_len,
+				   "duplicated access list value: %s",
+				   yang_dnode_get_string(args->dnode, NULL));
+			return NB_ERR_VALIDATION;
+		}
+		return NB_OK;
+	}
+
 	if (args->event != NB_EV_APPLY)
 		return NB_OK;
 
 	f = nb_running_get_entry(args->dnode, NULL, true);
+	f->cisco = 0;
 	fz = &f->u.zfilter;
 	yang_dnode_get_prefix(&fz->prefix, args->dnode, NULL);
+
+	acl_notify_route_map(f->acl, RMAP_EVENT_FILTER_ADDED);
 
 	return NB_OK;
 }
@@ -601,6 +543,8 @@ lib_access_list_entry_ipv4_prefix_destroy(struct nb_cb_destroy_args *args)
 	fz = &f->u.zfilter;
 	memset(&fz->prefix, 0, sizeof(fz->prefix));
 
+	acl_notify_route_map(f->acl, RMAP_EVENT_FILTER_DELETED);
+
 	return NB_OK;
 }
 
@@ -613,12 +557,27 @@ lib_access_list_entry_ipv4_exact_match_modify(struct nb_cb_modify_args *args)
 	struct filter_zebra *fz;
 	struct filter *f;
 
+	/* Don't allow duplicated values. */
+	if (args->event == NB_EV_VALIDATE) {
+		if (acl_zebra_is_dup(
+			    args->dnode,
+			    yang_dnode_get_enum(args->dnode, "../../type"))) {
+			snprintfrr(args->errmsg, args->errmsg_len,
+				   "duplicated access list value: %s",
+				   yang_dnode_get_string(args->dnode, NULL));
+			return NB_ERR_VALIDATION;
+		}
+		return NB_OK;
+	}
+
 	if (args->event != NB_EV_APPLY)
 		return NB_OK;
 
 	f = nb_running_get_entry(args->dnode, NULL, true);
 	fz = &f->u.zfilter;
 	fz->exact = yang_dnode_get_bool(args->dnode, NULL);
+
+	acl_notify_route_map(f->acl, RMAP_EVENT_FILTER_ADDED);
 
 	return NB_OK;
 }
@@ -636,6 +595,350 @@ lib_access_list_entry_ipv4_exact_match_destroy(struct nb_cb_destroy_args *args)
 	fz = &f->u.zfilter;
 	fz->exact = 0;
 
+	acl_notify_route_map(f->acl, RMAP_EVENT_FILTER_DELETED);
+
+	return NB_OK;
+}
+
+/*
+ * XPath: /frr-filter:lib/access-list/entry/host
+ */
+static int
+lib_access_list_entry_host_modify(struct nb_cb_modify_args *args)
+{
+	struct filter_cisco *fc;
+	struct filter *f;
+
+	/* Don't allow duplicated values. */
+	if (args->event == NB_EV_VALIDATE) {
+		if (acl_cisco_is_dup(args->dnode)) {
+			snprintfrr(args->errmsg, args->errmsg_len,
+				   "duplicated access list value: %s",
+				   yang_dnode_get_string(args->dnode, NULL));
+			return NB_ERR_VALIDATION;
+		}
+		return NB_OK;
+	}
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	f = nb_running_get_entry(args->dnode, NULL, true);
+	f->cisco = 1;
+	fc = &f->u.cfilter;
+	yang_dnode_get_ipv4(&fc->addr, args->dnode, NULL);
+	fc->addr_mask.s_addr = CISCO_BIN_HOST_WILDCARD_MASK;
+
+	acl_notify_route_map(f->acl, RMAP_EVENT_FILTER_ADDED);
+
+	return NB_OK;
+}
+
+static int
+lib_access_list_entry_host_destroy(struct nb_cb_destroy_args *args)
+{
+	struct filter_cisco *fc;
+	struct filter *f;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	f = nb_running_get_entry(args->dnode, NULL, true);
+	fc = &f->u.cfilter;
+	cisco_unset_addr_mask(&fc->addr, &fc->addr_mask);
+
+	acl_notify_route_map(f->acl, RMAP_EVENT_FILTER_DELETED);
+
+	return NB_OK;
+}
+
+/*
+ * XPath: /frr-filter:lib/access-list/entry/network/address
+ */
+static int
+lib_access_list_entry_network_address_modify(struct nb_cb_modify_args *args)
+{
+	struct filter_cisco *fc;
+	struct filter *f;
+
+	/* Don't allow duplicated values. */
+	if (args->event == NB_EV_VALIDATE) {
+		if (acl_cisco_is_dup(args->dnode)) {
+			snprintfrr(args->errmsg, args->errmsg_len,
+				   "duplicated access list value: %s",
+				   yang_dnode_get_string(args->dnode, NULL));
+			return NB_ERR_VALIDATION;
+		}
+		return NB_OK;
+	}
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	f = nb_running_get_entry(args->dnode, NULL, true);
+	f->cisco = 1;
+	fc = &f->u.cfilter;
+	yang_dnode_get_ipv4(&fc->addr, args->dnode, NULL);
+
+	acl_notify_route_map(f->acl, RMAP_EVENT_FILTER_ADDED);
+
+	return NB_OK;
+}
+
+/*
+ * XPath: /frr-filter:lib/access-list/entry/network/mask
+ */
+static int
+lib_access_list_entry_network_mask_modify(struct nb_cb_modify_args *args)
+{
+	struct filter_cisco *fc;
+	struct filter *f;
+
+	/* Don't allow duplicated values. */
+	if (args->event == NB_EV_VALIDATE) {
+		if (acl_cisco_is_dup(args->dnode)) {
+			snprintfrr(args->errmsg, args->errmsg_len,
+				   "duplicated access list value: %s",
+				   yang_dnode_get_string(args->dnode, NULL));
+			return NB_ERR_VALIDATION;
+		}
+		return NB_OK;
+	}
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	f = nb_running_get_entry(args->dnode, NULL, true);
+	f->cisco = 1;
+	fc = &f->u.cfilter;
+	yang_dnode_get_ipv4(&fc->addr_mask, args->dnode, NULL);
+
+	acl_notify_route_map(f->acl, RMAP_EVENT_FILTER_ADDED);
+
+	return NB_OK;
+}
+
+/*
+ * XPath: /frr-filter:lib/access-list/entry/source-any
+ */
+static int
+lib_access_list_entry_source_any_create(struct nb_cb_create_args *args)
+{
+	struct filter_cisco *fc;
+	struct filter *f;
+
+	/* Don't allow duplicated values. */
+	if (args->event == NB_EV_VALIDATE) {
+		if (acl_cisco_is_dup(args->dnode)) {
+			snprintfrr(args->errmsg, args->errmsg_len,
+				   "duplicated access list value: %s",
+				   yang_dnode_get_string(args->dnode, NULL));
+			return NB_ERR_VALIDATION;
+		}
+		return NB_OK;
+	}
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	f = nb_running_get_entry(args->dnode, NULL, true);
+	f->cisco = 1;
+	fc = &f->u.cfilter;
+	fc->addr.s_addr = INADDR_ANY;
+	fc->addr_mask.s_addr = CISCO_BIN_ANY_WILDCARD_MASK;
+
+	acl_notify_route_map(f->acl, RMAP_EVENT_FILTER_ADDED);
+
+	return NB_OK;
+}
+
+static int
+lib_access_list_entry_source_any_destroy(struct nb_cb_destroy_args *args)
+{
+	struct filter_cisco *fc;
+	struct filter *f;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	f = nb_running_get_entry(args->dnode, NULL, true);
+	fc = &f->u.cfilter;
+	cisco_unset_addr_mask(&fc->addr, &fc->addr_mask);
+
+	acl_notify_route_map(f->acl, RMAP_EVENT_FILTER_DELETED);
+
+	return NB_OK;
+}
+
+/*
+ * XPath: /frr-filter:lib/access-list/entry/destination-host
+ */
+static int lib_access_list_entry_destination_host_modify(
+	struct nb_cb_modify_args *args)
+{
+	struct filter_cisco *fc;
+	struct filter *f;
+
+	/* Don't allow duplicated values. */
+	if (args->event == NB_EV_VALIDATE) {
+		if (acl_cisco_is_dup(args->dnode)) {
+			snprintfrr(args->errmsg, args->errmsg_len,
+				   "duplicated access list value: %s",
+				   yang_dnode_get_string(args->dnode, NULL));
+			return NB_ERR_VALIDATION;
+		}
+		return NB_OK;
+	}
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	f = nb_running_get_entry(args->dnode, NULL, true);
+	fc = &f->u.cfilter;
+	fc->extended = 1;
+	yang_dnode_get_ipv4(&fc->mask, args->dnode, NULL);
+	fc->mask_mask.s_addr = CISCO_BIN_HOST_WILDCARD_MASK;
+
+	acl_notify_route_map(f->acl, RMAP_EVENT_FILTER_ADDED);
+
+	return NB_OK;
+}
+
+static int lib_access_list_entry_destination_host_destroy(
+	struct nb_cb_destroy_args *args)
+{
+	struct filter_cisco *fc;
+	struct filter *f;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	f = nb_running_get_entry(args->dnode, NULL, true);
+	fc = &f->u.cfilter;
+	fc->extended = 0;
+	cisco_unset_addr_mask(&fc->mask, &fc->mask_mask);
+
+	acl_notify_route_map(f->acl, RMAP_EVENT_FILTER_DELETED);
+
+	return NB_OK;
+}
+
+/*
+ * XPath: /frr-filter:lib/access-list/entry/destination-network/address
+ */
+static int lib_access_list_entry_destination_network_address_modify(
+	struct nb_cb_modify_args *args)
+{
+	struct filter_cisco *fc;
+	struct filter *f;
+
+	/* Don't allow duplicated values. */
+	if (args->event == NB_EV_VALIDATE) {
+		if (acl_cisco_is_dup(args->dnode)) {
+			snprintfrr(args->errmsg, args->errmsg_len,
+				   "duplicated access list value: %s",
+				   yang_dnode_get_string(args->dnode, NULL));
+			return NB_ERR_VALIDATION;
+		}
+		return NB_OK;
+	}
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	f = nb_running_get_entry(args->dnode, NULL, true);
+	fc = &f->u.cfilter;
+	fc->extended = 1;
+	yang_dnode_get_ipv4(&fc->mask, args->dnode, NULL);
+
+	acl_notify_route_map(f->acl, RMAP_EVENT_FILTER_ADDED);
+
+	return NB_OK;
+}
+
+/*
+ * XPath: /frr-filter:lib/access-list/entry/destination-network/mask
+ */
+static int lib_access_list_entry_destination_network_mask_modify(
+	struct nb_cb_modify_args *args)
+{
+	struct filter_cisco *fc;
+	struct filter *f;
+
+	/* Don't allow duplicated values. */
+	if (args->event == NB_EV_VALIDATE) {
+		if (acl_cisco_is_dup(args->dnode)) {
+			snprintfrr(args->errmsg, args->errmsg_len,
+				   "duplicated access list value: %s",
+				   yang_dnode_get_string(args->dnode, NULL));
+			return NB_ERR_VALIDATION;
+		}
+		return NB_OK;
+	}
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	f = nb_running_get_entry(args->dnode, NULL, true);
+	fc = &f->u.cfilter;
+	fc->extended = 1;
+	yang_dnode_get_ipv4(&fc->mask_mask, args->dnode, NULL);
+
+	acl_notify_route_map(f->acl, RMAP_EVENT_FILTER_ADDED);
+
+	return NB_OK;
+}
+
+/*
+ * XPath: /frr-filter:lib/access-list/entry/destination-any
+ */
+static int lib_access_list_entry_destination_any_create(
+	struct nb_cb_create_args *args)
+{
+	struct filter_cisco *fc;
+	struct filter *f;
+
+	/* Don't allow duplicated values. */
+	if (args->event == NB_EV_VALIDATE) {
+		if (acl_cisco_is_dup(args->dnode)) {
+			snprintfrr(args->errmsg, args->errmsg_len,
+				   "duplicated access list value: %s",
+				   yang_dnode_get_string(args->dnode, NULL));
+			return NB_ERR_VALIDATION;
+		}
+		return NB_OK;
+	}
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	f = nb_running_get_entry(args->dnode, NULL, true);
+	fc = &f->u.cfilter;
+	fc->extended = 1;
+	fc->mask.s_addr = INADDR_ANY;
+	fc->mask_mask.s_addr = CISCO_BIN_ANY_WILDCARD_MASK;
+
+	acl_notify_route_map(f->acl, RMAP_EVENT_FILTER_ADDED);
+
+	return NB_OK;
+}
+
+static int lib_access_list_entry_destination_any_destroy(
+	struct nb_cb_destroy_args *args)
+{
+	struct filter_cisco *fc;
+	struct filter *f;
+
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	f = nb_running_get_entry(args->dnode, NULL, true);
+	fc = &f->u.cfilter;
+	fc->extended = 0;
+	cisco_unset_addr_mask(&fc->mask, &fc->mask_mask);
+
+	acl_notify_route_map(f->acl, RMAP_EVENT_FILTER_DELETED);
+
 	return NB_OK;
 }
 
@@ -648,10 +951,24 @@ static int lib_access_list_entry_any_create(struct nb_cb_create_args *args)
 	struct filter *f;
 	int type;
 
+	/* Don't allow duplicated values. */
+	if (args->event == NB_EV_VALIDATE) {
+		if (acl_zebra_is_dup(
+			    args->dnode,
+			    yang_dnode_get_enum(args->dnode, "../../type"))) {
+			snprintfrr(args->errmsg, args->errmsg_len,
+				   "duplicated access list value: %s",
+				   yang_dnode_get_string(args->dnode, NULL));
+			return NB_ERR_VALIDATION;
+		}
+		return NB_OK;
+	}
+
 	if (args->event != NB_EV_APPLY)
 		return NB_OK;
 
 	f = nb_running_get_entry(args->dnode, NULL, true);
+	f->cisco = 0;
 	fz = &f->u.zfilter;
 	memset(&fz->prefix, 0, sizeof(fz->prefix));
 
@@ -668,6 +985,8 @@ static int lib_access_list_entry_any_create(struct nb_cb_create_args *args)
 		break;
 	}
 
+	acl_notify_route_map(f->acl, RMAP_EVENT_FILTER_ADDED);
+
 	return NB_OK;
 }
 
@@ -682,6 +1001,8 @@ static int lib_access_list_entry_any_destroy(struct nb_cb_destroy_args *args)
 	f = nb_running_get_entry(args->dnode, NULL, true);
 	fz = &f->u.zfilter;
 	fz->prefix.family = 0;
+
+	acl_notify_route_map(f->acl, RMAP_EVENT_FILTER_DELETED);
 
 	return NB_OK;
 }
@@ -837,15 +1158,12 @@ lib_prefix_list_entry_ipv4_prefix_modify(struct nb_cb_modify_args *args)
 	struct prefix p;
 
 	if (args->event == NB_EV_VALIDATE) {
-		/*
-		 * TODO: validate prefix_entry_dup_check() passes.
-		 *
-		 * This needs to be implemented using YANG lyd_node
-		 * navigation, because the `priv` data structures are not
-		 * available at `NB_EV_VALIDATE` phase. An easier
-		 * alternative would be mark `ipvx-prefix` as unique
-		 * (see RFC 7950, Section 7.8.3. The list "unique" Statement).
-		 */
+		if (plist_is_dup_nb(args->dnode)) {
+			snprintf(args->errmsg, args->errmsg_len,
+				 "duplicated prefix list value: %s",
+				 yang_dnode_get_string(args->dnode, NULL));
+			return NB_ERR_VALIDATION;
+		}
 		return NB_OK;
 	}
 
@@ -905,8 +1223,18 @@ static int lib_prefix_list_entry_ipv4_prefix_length_greater_or_equal_modify(
 	struct prefix_list_entry *ple;
 
 	if (args->event == NB_EV_VALIDATE &&
-	    prefix_list_length_validate(args->dnode) != NB_OK)
+	    prefix_list_length_validate(args) != NB_OK)
 		return NB_ERR_VALIDATION;
+
+	if (args->event == NB_EV_VALIDATE) {
+		if (plist_is_dup_nb(args->dnode)) {
+			snprintf(args->errmsg, args->errmsg_len,
+				 "duplicated prefix list value: %s",
+				 yang_dnode_get_string(args->dnode, NULL));
+			return NB_ERR_VALIDATION;
+		}
+		return NB_OK;
+	}
 
 	if (args->event != NB_EV_APPLY)
 		return NB_OK;
@@ -954,8 +1282,18 @@ static int lib_prefix_list_entry_ipv4_prefix_length_lesser_or_equal_modify(
 	struct prefix_list_entry *ple;
 
 	if (args->event == NB_EV_VALIDATE &&
-	    prefix_list_length_validate(args->dnode) != NB_OK)
+	    prefix_list_length_validate(args) != NB_OK)
 		return NB_ERR_VALIDATION;
+
+	if (args->event == NB_EV_VALIDATE) {
+		if (plist_is_dup_nb(args->dnode)) {
+			snprintf(args->errmsg, args->errmsg_len,
+				 "duplicated prefix list value: %s",
+				 yang_dnode_get_string(args->dnode, NULL));
+			return NB_ERR_VALIDATION;
+		}
+		return NB_OK;
+	}
 
 	if (args->event != NB_EV_APPLY)
 		return NB_OK;
@@ -1001,6 +1339,16 @@ static int lib_prefix_list_entry_any_create(struct nb_cb_create_args *args)
 {
 	struct prefix_list_entry *ple;
 	int type;
+
+	if (args->event == NB_EV_VALIDATE) {
+		if (plist_is_dup_nb(args->dnode)) {
+			snprintf(args->errmsg, args->errmsg_len,
+				 "duplicated prefix list value: %s",
+				 yang_dnode_get_string(args->dnode, NULL));
+			return NB_ERR_VALIDATION;
+		}
+		return NB_OK;
+	}
 
 	if (args->event != NB_EV_APPLY)
 		return NB_OK;
@@ -1060,77 +1408,6 @@ const struct frr_yang_module_info frr_filter_info = {
 	.name = "frr-filter",
 	.nodes = {
 		{
-			.xpath = "/frr-filter:lib/access-list-legacy",
-			.cbs = {
-				.create = lib_access_list_legacy_create,
-				.destroy = lib_access_list_legacy_destroy,
-			}
-		},
-		{
-			.xpath = "/frr-filter:lib/access-list-legacy/remark",
-			.cbs = {
-				.modify = lib_access_list_legacy_remark_modify,
-				.destroy = lib_access_list_legacy_remark_destroy,
-				.cli_show = access_list_legacy_remark_show,
-			}
-		},
-		{
-			.xpath = "/frr-filter:lib/access-list-legacy/entry",
-			.cbs = {
-				.create = lib_access_list_legacy_entry_create,
-				.destroy = lib_access_list_legacy_entry_destroy,
-				.cli_show = access_list_legacy_show,
-			}
-		},
-		{
-			.xpath = "/frr-filter:lib/access-list-legacy/entry/action",
-			.cbs = {
-				.modify = lib_access_list_legacy_entry_action_modify,
-			}
-		},
-		{
-			.xpath = "/frr-filter:lib/access-list-legacy/entry/host",
-			.cbs = {
-				.modify = lib_access_list_legacy_entry_host_modify,
-				.destroy = lib_access_list_legacy_entry_host_destroy,
-			}
-		},
-		{
-			.xpath = "/frr-filter:lib/access-list-legacy/entry/network",
-			.cbs = {
-				.modify = lib_access_list_legacy_entry_network_modify,
-				.destroy = lib_access_list_legacy_entry_network_destroy,
-			}
-		},
-		{
-			.xpath = "/frr-filter:lib/access-list-legacy/entry/any",
-			.cbs = {
-				.create = lib_access_list_legacy_entry_any_create,
-				.destroy = lib_access_list_legacy_entry_any_destroy,
-			}
-		},
-		{
-			.xpath = "/frr-filter:lib/access-list-legacy/entry/destination-host",
-			.cbs = {
-				.modify = lib_access_list_legacy_entry_destination_host_modify,
-				.destroy = lib_access_list_legacy_entry_destination_host_destroy,
-			}
-		},
-		{
-			.xpath = "/frr-filter:lib/access-list-legacy/entry/destination-network",
-			.cbs = {
-				.modify = lib_access_list_legacy_entry_destination_network_modify,
-				.destroy = lib_access_list_legacy_entry_destination_network_destroy,
-			}
-		},
-		{
-			.xpath = "/frr-filter:lib/access-list-legacy/entry/destination-any",
-			.cbs = {
-				.create = lib_access_list_legacy_entry_destination_any_create,
-				.destroy = lib_access_list_legacy_entry_destination_any_destroy,
-			}
-		},
-		{
 			.xpath = "/frr-filter:lib/access-list",
 			.cbs = {
 				.create = lib_access_list_create,
@@ -1140,8 +1417,8 @@ const struct frr_yang_module_info frr_filter_info = {
 		{
 			.xpath = "/frr-filter:lib/access-list/remark",
 			.cbs = {
-				.modify = lib_access_list_legacy_remark_modify,
-				.destroy = lib_access_list_legacy_remark_destroy,
+				.modify = lib_access_list_remark_modify,
+				.destroy = lib_access_list_remark_destroy,
 				.cli_show = access_list_remark_show,
 			}
 		},
@@ -1156,7 +1433,7 @@ const struct frr_yang_module_info frr_filter_info = {
 		{
 			.xpath = "/frr-filter:lib/access-list/entry/action",
 			.cbs = {
-				.modify = lib_access_list_legacy_entry_action_modify,
+				.modify = lib_access_list_entry_action_modify,
 			}
 		},
 		{
@@ -1171,6 +1448,58 @@ const struct frr_yang_module_info frr_filter_info = {
 			.cbs = {
 				.modify = lib_access_list_entry_ipv4_exact_match_modify,
 				.destroy = lib_access_list_entry_ipv4_exact_match_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-filter:lib/access-list/entry/host",
+			.cbs = {
+				.modify = lib_access_list_entry_host_modify,
+				.destroy = lib_access_list_entry_host_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-filter:lib/access-list/entry/network/address",
+			.cbs = {
+				.modify = lib_access_list_entry_network_address_modify,
+			}
+		},
+		{
+			.xpath = "/frr-filter:lib/access-list/entry/network/mask",
+			.cbs = {
+				.modify = lib_access_list_entry_network_mask_modify,
+			}
+		},
+		{
+			.xpath = "/frr-filter:lib/access-list/entry/source-any",
+			.cbs = {
+				.create = lib_access_list_entry_source_any_create,
+				.destroy = lib_access_list_entry_source_any_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-filter:lib/access-list/entry/destination-host",
+			.cbs = {
+				.modify = lib_access_list_entry_destination_host_modify,
+				.destroy = lib_access_list_entry_destination_host_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-filter:lib/access-list/entry/destination-network/address",
+			.cbs = {
+				.modify = lib_access_list_entry_destination_network_address_modify,
+			}
+		},
+		{
+			.xpath = "/frr-filter:lib/access-list/entry/destination-network/mask",
+			.cbs = {
+				.modify = lib_access_list_entry_destination_network_mask_modify,
+			}
+		},
+		{
+			.xpath = "/frr-filter:lib/access-list/entry/destination-any",
+			.cbs = {
+				.create = lib_access_list_entry_destination_any_create,
+				.destroy = lib_access_list_entry_destination_any_destroy,
 			}
 		},
 		{

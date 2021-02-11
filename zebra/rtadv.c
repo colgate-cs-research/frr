@@ -2282,13 +2282,11 @@ static int nd_dump_vty(struct vty *vty, struct interface *ifp)
 		interval = rtadv->MaxRtrAdvInterval;
 		if (interval % 1000)
 			vty_out(vty,
-				"  ND router advertisements are sent every "
-				"%d milliseconds\n",
+				"  ND router advertisements are sent every %d milliseconds\n",
 				interval);
 		else
 			vty_out(vty,
-				"  ND router advertisements are sent every "
-				"%d seconds\n",
+				"  ND router advertisements are sent every %d seconds\n",
 				interval / 1000);
 		if (!rtadv->UseFastRexmit)
 			vty_out(vty,
@@ -2302,8 +2300,7 @@ static int nd_dump_vty(struct vty *vty, struct interface *ifp)
 			vty_out(vty,
 				"  ND router advertisements lifetime tracks ra-interval\n");
 		vty_out(vty,
-			"  ND router advertisement default router preference is "
-			"%s\n",
+			"  ND router advertisement default router preference is %s\n",
 			rtadv_pref_strs[rtadv->DefaultPreference]);
 		if (rtadv->AdvManagedFlag)
 			vty_out(vty,
@@ -2340,7 +2337,6 @@ static int rtadv_config_write(struct vty *vty, struct interface *ifp)
 	struct rtadv_prefix *rprefix;
 	struct rtadv_rdnss *rdnss;
 	struct rtadv_dnssl *dnssl;
-	char buf[PREFIX_STRLEN];
 	int interval;
 
 	zif = ifp->info;
@@ -2411,8 +2407,7 @@ static int rtadv_config_write(struct vty *vty, struct interface *ifp)
 	for (ALL_LIST_ELEMENTS_RO(zif->rtadv.AdvPrefixList, node, rprefix)) {
 		if ((rprefix->AdvPrefixCreate == PREFIX_SRC_MANUAL)
 		    || (rprefix->AdvPrefixCreate == PREFIX_SRC_BOTH)) {
-			vty_out(vty, " ipv6 nd prefix %s",
-				prefix2str(&rprefix->prefix, buf, sizeof(buf)));
+			vty_out(vty, " ipv6 nd prefix %pFX", &rprefix->prefix);
 			if ((rprefix->AdvValidLifetime != RTADV_VALID_LIFETIME)
 			    || (rprefix->AdvPreferredLifetime
 				!= RTADV_PREFERRED_LIFETIME)) {

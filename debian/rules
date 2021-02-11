@@ -22,17 +22,23 @@ else
 endif
 
 ifeq ($(filter pkg.frr.nosystemd,$(DEB_BUILD_PROFILES)),)
-  DH_WITH_SYSTEMD=systemd,
+  DH_WITHOUT_SYSTEMD=
   CONF_SYSTEMD=--enable-systemd=yes
 else
-  DH_WITH_SYSTEMD=
+  DH_WITHOUT_SYSTEMD=--without=systemd
   CONF_SYSTEMD=--enable-systemd=no
+endif
+
+ifeq ($(filter pkg.frr.lua,$(DEB_BUILD_PROFILES)),)
+  CONF_LUA=--disable-scripting
+else
+  CONF_LUA=--enable-scripting
 endif
 
 export PYTHON=python3
 
 %:
-	dh $@ --with=$(DH_WITH_SYSTEMD)autoreconf --parallel
+	dh $@ $(DH_WITHOUT_SYSTEMD)
 
 override_dh_auto_configure:
 	$(shell dpkg-buildflags --export=sh); \
@@ -49,6 +55,7 @@ override_dh_auto_configure:
 		\
 		$(CONF_SYSTEMD) \
 		$(CONF_RPKI) \
+		$(CONF_LUA) \
 		--with-libpam \
 		--enable-doc \
 		--enable-doc-html \

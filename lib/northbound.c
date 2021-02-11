@@ -57,6 +57,8 @@ static struct {
 	const void *owner_user;
 } running_config_mgmt_lock;
 
+/* Knob to record config transaction */
+static bool nb_db_enabled;
 /*
  * Global lock used to prevent multiple configuration transactions from
  * happening concurrently.
@@ -120,9 +122,9 @@ static int nb_node_new_cb(const struct lys_node *snode, void *arg)
 	if (CHECK_FLAG(snode->nodetype, LYS_CONTAINER | LYS_LIST)) {
 		bool config_only = true;
 
-		yang_snodes_iterate_subtree(snode, nb_node_check_config_only,
-					    YANG_ITER_ALLOW_AUGMENTATIONS,
-					    &config_only);
+		(void)yang_snodes_iterate_subtree(snode, NULL,
+						  nb_node_check_config_only, 0,
+						  &config_only);
 		if (config_only)
 			SET_FLAG(nb_node->flags, F_NB_NODE_CONFIG_ONLY);
 	}
@@ -139,6 +141,7 @@ static int nb_node_new_cb(const struct lys_node *snode, void *arg)
 	 * another.
 	 */
 	nb_node->snode = snode;
+	assert(snode->priv == NULL);
 	lys_set_private(snode, nb_node);
 
 	return YANG_ITER_CONTINUE;
@@ -149,20 +152,22 @@ static int nb_node_del_cb(const struct lys_node *snode, void *arg)
 	struct nb_node *nb_node;
 
 	nb_node = snode->priv;
-	lys_set_private(snode, NULL);
-	XFREE(MTYPE_NB_NODE, nb_node);
+	if (nb_node) {
+		lys_set_private(snode, NULL);
+		XFREE(MTYPE_NB_NODE, nb_node);
+	}
 
 	return YANG_ITER_CONTINUE;
 }
 
 void nb_nodes_create(void)
 {
-	yang_snodes_iterate_all(nb_node_new_cb, 0, NULL);
+	yang_snodes_iterate(NULL, nb_node_new_cb, 0, NULL);
 }
 
 void nb_nodes_delete(void)
 {
-	yang_snodes_iterate_all(nb_node_del_cb, 0, NULL);
+	yang_snodes_iterate(NULL, nb_node_del_cb, 0, NULL);
 }
 
 struct nb_node *nb_node_find(const char *xpath)
@@ -270,8 +275,10 @@ static int nb_node_validate(const struct lys_node *snode, void *arg)
 	unsigned int *errors = arg;
 
 	/* Validate callbacks and priority. */
-	*errors += nb_node_validate_cbs(nb_node);
-	*errors += nb_node_validate_priority(nb_node);
+	if (nb_node) {
+		*errors += nb_node_validate_cbs(nb_node);
+		*errors += nb_node_validate_priority(nb_node);
+	}
 
 	return YANG_ITER_CONTINUE;
 }
@@ -381,6 +388,10 @@ static void nb_config_diff_add_change(struct nb_config_cbs *changes,
 {
 	struct nb_config_change *change;
 
+	/* Ignore unimplemented nodes. */
+	if (!dnode->schema->priv)
+		return;
+
 	change = XCALLOC(MTYPE_TMP, sizeof(*change));
 	change->cb.operation = operation;
 	change->cb.seq = *seq;
@@ -413,6 +424,10 @@ static void nb_config_diff_created(const struct lyd_node *dnode, uint32_t *seq,
 {
 	enum nb_operation operation;
 	struct lyd_node *child;
+
+	/* Ignore unimplemented nodes. */
+	if (!dnode->schema->priv)
+		return;
 
 	switch (dnode->schema->nodetype) {
 	case LYS_LEAF:
@@ -448,6 +463,10 @@ static void nb_config_diff_created(const struct lyd_node *dnode, uint32_t *seq,
 static void nb_config_diff_deleted(const struct lyd_node *dnode, uint32_t *seq,
 				   struct nb_config_cbs *changes)
 {
+	/* Ignore unimplemented nodes. */
+	if (!dnode->schema->priv)
+		return;
+
 	if (nb_operation_is_valid(NB_OP_DESTROY, dnode->schema))
 		nb_config_diff_add_change(changes, NB_OP_DESTROY, seq, dnode);
 	else if (CHECK_FLAG(dnode->schema->nodetype, LYS_CONTAINER)) {
@@ -616,7 +635,7 @@ static int nb_candidate_validate_code(struct nb_context *context,
 			struct nb_node *nb_node;
 
 			nb_node = child->schema->priv;
-			if (!nb_node->cbs.pre_validate)
+			if (!nb_node || !nb_node->cbs.pre_validate)
 				goto next;
 
 			ret = nb_callback_pre_validate(context, nb_node, child,
@@ -680,8 +699,12 @@ int nb_candidate_commit_prepare(struct nb_context *context,
 
 	RB_INIT(nb_config_cbs, &changes);
 	nb_config_diff(running_config, candidate, &changes);
-	if (RB_EMPTY(nb_config_cbs, &changes))
+	if (RB_EMPTY(nb_config_cbs, &changes)) {
+		snprintf(
+			errmsg, errmsg_len,
+			"No changes to apply were found during preparation phase");
 		return NB_ERR_NO_CHANGES;
+	}
 
 	if (nb_candidate_validate_code(context, candidate, &changes, errmsg,
 				       errmsg_len)
@@ -707,30 +730,28 @@ int nb_candidate_commit_prepare(struct nb_context *context,
 				      errmsg_len);
 }
 
-void nb_candidate_commit_abort(struct nb_transaction *transaction)
+void nb_candidate_commit_abort(struct nb_transaction *transaction, char *errmsg,
+			       size_t errmsg_len)
 {
-	char errmsg[BUFSIZ] = {0};
-
 	(void)nb_transaction_process(NB_EV_ABORT, transaction, errmsg,
-				     sizeof(errmsg));
+				     errmsg_len);
 	nb_transaction_free(transaction);
 }
 
 void nb_candidate_commit_apply(struct nb_transaction *transaction,
-			       bool save_transaction, uint32_t *transaction_id)
+			       bool save_transaction, uint32_t *transaction_id,
+			       char *errmsg, size_t errmsg_len)
 {
-	char errmsg[BUFSIZ] = {0};
-
 	(void)nb_transaction_process(NB_EV_APPLY, transaction, errmsg,
-				     sizeof(errmsg));
-	nb_transaction_apply_finish(transaction, errmsg, sizeof(errmsg));
+				     errmsg_len);
+	nb_transaction_apply_finish(transaction, errmsg, errmsg_len);
 
 	/* Replace running by candidate. */
 	transaction->config->version++;
 	nb_config_replace(running_config, transaction->config, true);
 
 	/* Record transaction. */
-	if (save_transaction
+	if (save_transaction && nb_db_enabled
 	    && nb_db_transaction_save(transaction, transaction_id) != NB_OK)
 		flog_warn(EC_LIB_NB_TRANSACTION_RECORD_FAILED,
 			  "%s: failed to record transaction", __func__);
@@ -754,9 +775,9 @@ int nb_candidate_commit(struct nb_context *context, struct nb_config *candidate,
 	 */
 	if (ret == NB_OK)
 		nb_candidate_commit_apply(transaction, save_transaction,
-					  transaction_id);
+					  transaction_id, errmsg, errmsg_len);
 	else if (transaction != NULL)
-		nb_candidate_commit_abort(transaction);
+		nb_candidate_commit_abort(transaction, errmsg, errmsg_len);
 
 	return ret;
 }
@@ -1125,7 +1146,8 @@ const void *nb_callback_lookup_entry(const struct nb_node *nb_node,
 }
 
 int nb_callback_rpc(const struct nb_node *nb_node, const char *xpath,
-		    const struct list *input, struct list *output)
+		    const struct list *input, struct list *output, char *errmsg,
+		    size_t errmsg_len)
 {
 	struct nb_cb_rpc_args args = {};
 
@@ -1134,6 +1156,8 @@ int nb_callback_rpc(const struct nb_node *nb_node, const char *xpath,
 	args.xpath = xpath;
 	args.input = input;
 	args.output = output;
+	args.errmsg = errmsg;
+	args.errmsg_len = errmsg_len;
 	return nb_node->cbs.rpc(&args);
 }
 
@@ -1381,7 +1405,7 @@ static void nb_transaction_apply_finish(struct nb_transaction *transaction,
 			struct nb_node *nb_node;
 
 			nb_node = dnode->schema->priv;
-			if (!nb_node->cbs.apply_finish)
+			if (!nb_node || !nb_node->cbs.apply_finish)
 				goto next;
 
 			/*
@@ -2046,24 +2070,29 @@ void *nb_running_unset_entry(const struct lyd_node *dnode)
 	return entry;
 }
 
-void *nb_running_get_entry(const struct lyd_node *dnode, const char *xpath,
-			   bool abort_if_not_found)
+static void *nb_running_get_entry_worker(const struct lyd_node *dnode,
+					 const char *xpath,
+					 bool abort_if_not_found,
+					 bool rec_search)
 {
 	const struct lyd_node *orig_dnode = dnode;
 	char xpath_buf[XPATH_MAXLEN];
+	bool rec_flag = true;
 
 	assert(dnode || xpath);
 
 	if (!dnode)
 		dnode = yang_dnode_get(running_config->dnode, xpath);
 
-	while (dnode) {
+	while (rec_flag && dnode) {
 		struct nb_config_entry *config, s;
 
 		yang_dnode_get_path(dnode, s.xpath, sizeof(s.xpath));
 		config = hash_lookup(running_config_entries, &s);
 		if (config)
 			return config->entry;
+
+		rec_flag = rec_search;
 
 		dnode = dnode->parent;
 	}
@@ -2076,6 +2105,20 @@ void *nb_running_get_entry(const struct lyd_node *dnode, const char *xpath,
 		 "%s: failed to find entry [xpath %s]", __func__, xpath_buf);
 	zlog_backtrace(LOG_ERR);
 	abort();
+}
+
+void *nb_running_get_entry(const struct lyd_node *dnode, const char *xpath,
+			   bool abort_if_not_found)
+{
+	return nb_running_get_entry_worker(dnode, xpath, abort_if_not_found,
+					   true);
+}
+
+void *nb_running_get_entry_non_rec(const struct lyd_node *dnode,
+				   const char *xpath, bool abort_if_not_found)
+{
+	return nb_running_get_entry_worker(dnode, xpath, abort_if_not_found,
+					   false);
 }
 
 /* Logging functions. */
@@ -2193,25 +2236,11 @@ static void nb_load_callbacks(const struct frr_yang_module_info *module)
 	}
 }
 
-void nb_init(struct thread_master *tm,
-	     const struct frr_yang_module_info *const modules[],
-	     size_t nmodules)
+void nb_validate_callbacks(void)
 {
 	unsigned int errors = 0;
 
-	/* Load YANG modules. */
-	for (size_t i = 0; i < nmodules; i++)
-		yang_module_load(modules[i]->name);
-
-	/* Create a nb_node for all YANG schema nodes. */
-	nb_nodes_create();
-
-	/* Load northbound callbacks. */
-	for (size_t i = 0; i < nmodules; i++)
-		nb_load_callbacks(modules[i]);
-
-	/* Validate northbound callbacks. */
-	yang_snodes_iterate_all(nb_node_validate, 0, &errors);
+	yang_snodes_iterate(NULL, nb_node_validate, 0, &errors);
 	if (errors > 0) {
 		flog_err(
 			EC_LIB_NB_CBS_VALIDATION,
@@ -2219,6 +2248,32 @@ void nb_init(struct thread_master *tm,
 			__func__, errors);
 		exit(1);
 	}
+}
+
+void nb_load_module(const struct frr_yang_module_info *module_info)
+{
+	struct yang_module *module;
+
+	DEBUGD(&nb_dbg_events, "northbound: loading %s.yang",
+	       module_info->name);
+
+	module = yang_module_load(module_info->name);
+	yang_snodes_iterate(module->info, nb_node_new_cb, 0, NULL);
+	nb_load_callbacks(module_info);
+}
+
+void nb_init(struct thread_master *tm,
+	     const struct frr_yang_module_info *const modules[],
+	     size_t nmodules, bool db_enabled)
+{
+	nb_db_enabled = db_enabled;
+
+	/* Load YANG modules and their corresponding northbound callbacks. */
+	for (size_t i = 0; i < nmodules; i++)
+		nb_load_module(modules[i]);
+
+	/* Validate northbound callbacks. */
+	nb_validate_callbacks();
 
 	/* Create an empty running configuration. */
 	running_config = nb_config_new(NULL);

@@ -133,6 +133,7 @@ struct route_table *zebra_router_get_table(struct zebra_vrf *zvrf,
 	info->zvrf = zvrf;
 	info->afi = afi;
 	info->safi = safi;
+	info->table_id = tableid;
 	route_table_set_info(zrt->table, info);
 	zrt->table->cleanup = zebra_rtable_node_cleanup;
 
@@ -256,7 +257,12 @@ void zebra_router_terminate(void)
 	hash_free(zrouter.iptable_hash);
 }
 
-void zebra_router_init(void)
+bool zebra_router_notify_on_ack(void)
+{
+	return !zrouter.asic_offloaded || zrouter.notify_on_ack;
+}
+
+void zebra_router_init(bool asic_offload, bool notify_on_ack)
 {
 	zrouter.sequence_num = 0;
 
@@ -289,4 +295,7 @@ void zebra_router_init(void)
 	zrouter.nhgs_id =
 		hash_create_size(8, zebra_nhg_id_key, zebra_nhg_hash_id_equal,
 				 "Zebra Router Nexthop Groups ID index");
+
+	zrouter.asic_offloaded = asic_offload;
+	zrouter.notify_on_ack = notify_on_ack;
 }

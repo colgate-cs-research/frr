@@ -21,6 +21,7 @@
 
 #include "lib/log.h"
 #include "lib/northbound.h"
+#include "lib/printfrr.h"
 #include "libfrr.h"
 #include "lib/command.h"
 #include "lib/routemap.h"
@@ -31,6 +32,8 @@
 #include "zebra/connected.h"
 #include "zebra/zebra_router.h"
 #include "zebra/debug.h"
+#include "zebra/zebra_vxlan_private.h"
+#include "zebra/zebra_vxlan.h"
 
 /*
  * XPath: /frr-zebra:zebra/mcast-rpf-lookup
@@ -259,99 +262,6 @@ int zebra_allow_external_route_update_destroy(struct nb_cb_destroy_args *args)
  * XPath: /frr-zebra:zebra/dplane-queue-limit
  */
 int zebra_dplane_queue_limit_modify(struct nb_cb_modify_args *args)
-{
-	switch (args->event) {
-	case NB_EV_VALIDATE:
-	case NB_EV_PREPARE:
-	case NB_EV_ABORT:
-	case NB_EV_APPLY:
-		/* TODO: implement me. */
-		break;
-	}
-
-	return NB_OK;
-}
-
-/*
- * XPath: /frr-zebra:zebra/vrf-vni-mapping
- */
-int zebra_vrf_vni_mapping_create(struct nb_cb_create_args *args)
-{
-	switch (args->event) {
-	case NB_EV_VALIDATE:
-	case NB_EV_PREPARE:
-	case NB_EV_ABORT:
-	case NB_EV_APPLY:
-		/* TODO: implement me. */
-		break;
-	}
-
-	return NB_OK;
-}
-
-int zebra_vrf_vni_mapping_destroy(struct nb_cb_destroy_args *args)
-{
-	switch (args->event) {
-	case NB_EV_VALIDATE:
-	case NB_EV_PREPARE:
-	case NB_EV_ABORT:
-	case NB_EV_APPLY:
-		/* TODO: implement me. */
-		break;
-	}
-
-	return NB_OK;
-}
-
-/*
- * XPath: /frr-zebra:zebra/vrf-vni-mapping/vni-id
- */
-int zebra_vrf_vni_mapping_vni_id_modify(struct nb_cb_modify_args *args)
-{
-	switch (args->event) {
-	case NB_EV_VALIDATE:
-	case NB_EV_PREPARE:
-	case NB_EV_ABORT:
-	case NB_EV_APPLY:
-		/* TODO: implement me. */
-		break;
-	}
-
-	return NB_OK;
-}
-
-int zebra_vrf_vni_mapping_vni_id_destroy(struct nb_cb_destroy_args *args)
-{
-	switch (args->event) {
-	case NB_EV_VALIDATE:
-	case NB_EV_PREPARE:
-	case NB_EV_ABORT:
-	case NB_EV_APPLY:
-		/* TODO: implement me. */
-		break;
-	}
-
-	return NB_OK;
-}
-
-/*
- * XPath: /frr-zebra:zebra/vrf-vni-mapping/prefix-only
- */
-int zebra_vrf_vni_mapping_prefix_only_create(struct nb_cb_create_args *args)
-{
-	switch (args->event) {
-	case NB_EV_VALIDATE:
-	case NB_EV_PREPARE:
-	case NB_EV_ABORT:
-	case NB_EV_APPLY:
-		/* TODO: implement me. */
-		break;
-	}
-
-	return NB_OK;
-}
-
-int zebra_vrf_vni_mapping_prefix_only_destroy(struct nb_cb_destroy_args *args)
 {
 	switch (args->event) {
 	case NB_EV_VALIDATE:
@@ -930,7 +840,6 @@ int lib_interface_zebra_ip_addrs_create(struct nb_cb_create_args *args)
 {
 	struct interface *ifp;
 	struct prefix prefix;
-	char buf[PREFIX_STRLEN] = {0};
 
 	ifp = nb_running_get_entry(args->dnode, NULL, true);
 	// addr_family = yang_dnode_get_enum(dnode, "./address-family");
@@ -941,15 +850,13 @@ int lib_interface_zebra_ip_addrs_create(struct nb_cb_create_args *args)
 	case NB_EV_VALIDATE:
 		if (prefix.family == AF_INET
 		    && ipv4_martian(&prefix.u.prefix4)) {
-			snprintf(args->errmsg, args->errmsg_len,
-				 "invalid address %s",
-				 prefix2str(&prefix, buf, sizeof(buf)));
+			snprintfrr(args->errmsg, args->errmsg_len,
+				   "invalid address %pFX", &prefix);
 			return NB_ERR_VALIDATION;
 		} else if (prefix.family == AF_INET6
 			   && ipv6_martian(&prefix.u.prefix6)) {
-			snprintf(args->errmsg, args->errmsg_len,
-				 "invalid address %s",
-				 prefix2str(&prefix, buf, sizeof(buf)));
+			snprintfrr(args->errmsg, args->errmsg_len,
+				   "invalid address %pFX", &prefix);
 			return NB_ERR_VALIDATION;
 		}
 		break;
@@ -1242,7 +1149,7 @@ int lib_vrf_zebra_ribs_rib_create(struct nb_cb_create_args *args)
 		table_id = zvrf->table_id;
 
 	afi_safi_name = yang_dnode_get_string(args->dnode, "./afi-safi-name");
-	zebra_afi_safi_identity2value(afi_safi_name, &afi, &safi);
+	yang_afi_safi_identity2value(afi_safi_name, &afi, &safi);
 
 	zrt = zebra_router_find_zrt(zvrf, table_id, afi, safi);
 
@@ -1277,6 +1184,161 @@ int lib_vrf_zebra_ribs_rib_destroy(struct nb_cb_destroy_args *args)
 	return NB_OK;
 }
 
+/*
+ * XPath: /frr-vrf:lib/vrf/frr-zebra:zebra/l3vni-id
+ */
+int lib_vrf_zebra_l3vni_id_modify(struct nb_cb_modify_args *args)
+{
+	struct vrf *vrf;
+	struct zebra_vrf *zvrf;
+	vni_t vni = 0;
+	zebra_l3vni_t *zl3vni = NULL;
+	struct zebra_vrf *zvrf_evpn = NULL;
+	char err[ERR_STR_SZ];
+	bool pfx_only = false;
+	const struct lyd_node *pn_dnode;
+	const char *vrfname;
+
+	switch (args->event) {
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+		return NB_OK;
+	case NB_EV_VALIDATE:
+		zvrf_evpn = zebra_vrf_get_evpn();
+		if (!zvrf_evpn) {
+			snprintf(args->errmsg, args->errmsg_len,
+				 "evpn vrf is not present.");
+			return NB_ERR_VALIDATION;
+		}
+		vni = yang_dnode_get_uint32(args->dnode, NULL);
+		/* Get vrf info from parent node, reject configuration
+		 * if zebra vrf already mapped to different vni id.
+		 */
+		pn_dnode = yang_dnode_get_parent(args->dnode, "vrf");
+		if (pn_dnode) {
+			vrfname = yang_dnode_get_string(pn_dnode, "./name");
+			zvrf = zebra_vrf_lookup_by_name(vrfname);
+			if (!zvrf) {
+				snprintf(args->errmsg, args->errmsg_len,
+					 "zebra vrf info not found for vrf:%s.",
+					 vrfname);
+				return NB_ERR_VALIDATION;
+			}
+			if (zvrf->l3vni && zvrf->l3vni != vni) {
+				snprintf(
+					args->errmsg, args->errmsg_len,
+					"vni %u cannot be configured as vni %u is already configured under the vrf",
+					vni, zvrf->l3vni);
+				return NB_ERR_VALIDATION;
+			}
+		}
+
+		/* Check if this VNI is already present in the system */
+		zl3vni = zl3vni_lookup(vni);
+		if (zl3vni) {
+			snprintf(args->errmsg, args->errmsg_len,
+				 "VNI %u is already configured as L3-VNI", vni);
+			return NB_ERR_VALIDATION;
+		}
+
+		break;
+	case NB_EV_APPLY:
+
+		vrf = nb_running_get_entry(args->dnode, NULL, true);
+		zvrf = zebra_vrf_lookup_by_name(vrf->name);
+		vni = yang_dnode_get_uint32(args->dnode, NULL);
+		/* Note: This covers lib_vrf_zebra_prefix_only_modify() config
+		 * along with l3vni config
+		 */
+		pfx_only = yang_dnode_get_bool(args->dnode, "../prefix-only");
+
+		if (zebra_vxlan_process_vrf_vni_cmd(zvrf, vni, err, ERR_STR_SZ,
+						    pfx_only ? 1 : 0, 1)
+		    != 0) {
+			if (IS_ZEBRA_DEBUG_VXLAN)
+				snprintf(
+					args->errmsg, args->errmsg_len,
+					"vrf vni %u mapping failed with error: %s",
+					vni, err);
+			return NB_ERR;
+		}
+
+		/* Mark as having FRR configuration */
+		vrf_set_user_cfged(vrf);
+
+		break;
+	}
+
+	return NB_OK;
+}
+
+int lib_vrf_zebra_l3vni_id_destroy(struct nb_cb_destroy_args *args)
+{
+	struct vrf *vrf;
+	struct zebra_vrf *zvrf;
+	vni_t vni = 0;
+	char err[ERR_STR_SZ];
+	uint8_t filter = 0;
+
+	switch (args->event) {
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+	case NB_EV_VALIDATE:
+		return NB_OK;
+	case NB_EV_APPLY:
+		vrf = nb_running_get_entry(args->dnode, NULL, true);
+		zvrf = zebra_vrf_lookup_by_name(vrf->name);
+		vni = yang_dnode_get_uint32(args->dnode, NULL);
+
+		if (!zl3vni_lookup(vni))
+			return NB_OK;
+
+		if (zvrf->l3vni != vni) {
+			snprintf(args->errmsg, args->errmsg_len,
+				 "vrf %s has different vni %u mapped",
+				 vrf->name, zvrf->l3vni);
+			return NB_ERR;
+		}
+
+		if (is_l3vni_for_prefix_routes_only(zvrf->l3vni))
+			filter = 1;
+
+		if (zebra_vxlan_process_vrf_vni_cmd(zvrf, vni, err, ERR_STR_SZ,
+						    filter, 0)
+		    != 0) {
+			if (IS_ZEBRA_DEBUG_VXLAN)
+				zlog_debug(
+					"vrf vni %u unmapping failed with error: %s",
+					vni, err);
+			return NB_ERR;
+		}
+
+		/* If no other FRR config for this VRF, mark accordingly. */
+		if (!zebra_vrf_has_config(zvrf))
+			vrf_reset_user_cfged(vrf);
+
+		break;
+	}
+
+	return NB_OK;
+}
+
+/*
+ * XPath: /frr-vrf:lib/vrf/frr-zebra:zebra/prefix-only
+ */
+int lib_vrf_zebra_prefix_only_modify(struct nb_cb_modify_args *args)
+{
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+	case NB_EV_APPLY:
+		/* TODO: implement me. */
+		break;
+	}
+
+	return NB_OK;
+}
 
 /*
  * XPath:
@@ -1488,12 +1550,14 @@ int lib_route_map_entry_set_action_source_v4_modify(
 			if (pif != NULL)
 				break;
 		}
-		if (pif == NULL) {
-			snprintf(args->errmsg, args->errmsg_len,
-				 "is not a local adddress: %s",
-				 yang_dnode_get_string(args->dnode, NULL));
-			return NB_ERR_VALIDATION;
-		}
+		/*
+		 * On startup the local address *may* not have come up
+		 * yet.  We need to allow startup configuration of
+		 * set src or we are fudged.  Log it for future fun
+		 */
+		if (pif == NULL)
+			zlog_warn("set src %pI4 is not a local address",
+				  &p.u.prefix4);
 		return NB_OK;
 	case NB_EV_PREPARE:
 	case NB_EV_ABORT:
@@ -1556,12 +1620,14 @@ int lib_route_map_entry_set_action_source_v6_modify(
 			if (pif != NULL)
 				break;
 		}
-		if (pif == NULL) {
-			snprintf(args->errmsg, args->errmsg_len,
-				 "is not a local adddress: %s",
-				 yang_dnode_get_string(args->dnode, NULL));
-			return NB_ERR_VALIDATION;
-		}
+		/*
+		 * On startup the local address *may* not have come up
+		 * yet.  We need to allow startup configuration of
+		 * set src or we are fudged.  Log it for future fun
+		 */
+		if (pif == NULL)
+			zlog_warn("set src %pI6 is not a local address",
+				  &p.u.prefix6);
 		return NB_OK;
 	case NB_EV_PREPARE:
 	case NB_EV_ABORT:

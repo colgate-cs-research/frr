@@ -137,6 +137,11 @@ DEFPY(pbr_map_match_src, pbr_map_match_src_cmd,
 {
 	struct pbr_map_sequence *pbrms = VTY_GET_CONTEXT(pbr_map_sequence);
 
+	if (pbrms->dst && pbrms->family && prefix->family != pbrms->family) {
+		vty_out(vty, "Cannot mismatch families within match src/dst\n");
+		return CMD_WARNING_CONFIG_FAILED;
+	}
+
 	pbrms->family = prefix->family;
 
 	if (!no) {
@@ -165,6 +170,11 @@ DEFPY(pbr_map_match_dst, pbr_map_match_dst_cmd,
 {
 	struct pbr_map_sequence *pbrms = VTY_GET_CONTEXT(pbr_map_sequence);
 
+	if (pbrms->src && pbrms->family && prefix->family != pbrms->family) {
+		vty_out(vty, "Cannot mismatch families within match src/dst\n");
+		return CMD_WARNING_CONFIG_FAILED;
+	}
+
 	pbrms->family = prefix->family;
 
 	if (!no) {
@@ -177,6 +187,91 @@ DEFPY(pbr_map_match_dst, pbr_map_match_dst_cmd,
 		prefix_copy(pbrms->dst, prefix);
 	} else
 		prefix_free(&pbrms->dst);
+
+	pbr_map_check(pbrms, true);
+
+	return CMD_SUCCESS;
+}
+
+DEFPY(pbr_map_match_dscp, pbr_map_match_dscp_cmd,
+      "[no] match dscp DSCP$dscp",
+      NO_STR
+      "Match the rest of the command\n"
+      "Match based on IP DSCP field\n"
+      "DSCP value (below 64) or standard codepoint name\n")
+{
+	struct pbr_map_sequence *pbrms = VTY_GET_CONTEXT(pbr_map_sequence);
+	char dscpname[100];
+	uint8_t rawDscp;
+
+	/* Discriminate dscp enums (cs0, cs1 etc.) and numbers */
+	bool isANumber = true;
+	for (int i = 0; i < (int)strlen(dscp); i++) {
+		/* Letters are not numbers */
+		if (!isdigit(dscp[i]))
+			isANumber = false;
+
+		/* Lowercase the dscp enum (if needed) */
+		if (isupper(dscp[i]))
+			dscpname[i] = tolower(dscp[i]);
+		else
+			dscpname[i] = dscp[i];
+	}
+	dscpname[strlen(dscp)] = '\0';
+
+	if (isANumber) {
+		/* dscp passed is a regular number */
+		long dscpAsNum = strtol(dscp, NULL, 0);
+
+		if (dscpAsNum > PBR_DSFIELD_DSCP >> 2) {
+			/* Refuse to install on overflow */
+			vty_out(vty, "dscp (%s) must be less than 64\n", dscp);
+			return CMD_WARNING_CONFIG_FAILED;
+		}
+		rawDscp = dscpAsNum;
+	} else {
+		/* check dscp if it is an enum like cs0 */
+		rawDscp = pbr_map_decode_dscp_enum(dscpname);
+		if (rawDscp > PBR_DSFIELD_DSCP) {
+			vty_out(vty, "Invalid dscp value: %s\n", dscpname);
+			return CMD_WARNING_CONFIG_FAILED;
+		}
+	}
+
+	if (!no) {
+		if (((pbrms->dsfield & PBR_DSFIELD_DSCP) >> 2) == rawDscp)
+			return CMD_SUCCESS;
+
+		/* Set the DSCP bits of the DSField */
+		pbrms->dsfield =
+			(pbrms->dsfield & ~PBR_DSFIELD_DSCP) | (rawDscp << 2);
+	} else {
+		pbrms->dsfield &= ~PBR_DSFIELD_DSCP;
+	}
+
+	pbr_map_check(pbrms, true);
+
+	return CMD_SUCCESS;
+}
+
+DEFPY(pbr_map_match_ecn, pbr_map_match_ecn_cmd,
+      "[no] match ecn (0-3)$ecn",
+      NO_STR
+      "Match the rest of the command\n"
+      "Match based on IP ECN field\n"
+      "Explicit Congestion Notification\n")
+{
+	struct pbr_map_sequence *pbrms = VTY_GET_CONTEXT(pbr_map_sequence);
+
+	if (!no) {
+		if ((pbrms->dsfield & PBR_DSFIELD_ECN) == ecn)
+			return CMD_SUCCESS;
+
+		/* Set the ECN bits of the DSField */
+		pbrms->dsfield = (pbrms->dsfield & ~PBR_DSFIELD_ECN) | ecn;
+	} else {
+		pbrms->dsfield &= ~PBR_DSFIELD_ECN;
+	}
 
 	pbr_map_check(pbrms, true);
 
@@ -312,7 +407,7 @@ DEFPY(pbr_map_nexthop, pbr_map_nexthop_cmd,
 		vrf = vrf_lookup_by_id(VRF_DEFAULT);
 
 	if (!vrf) {
-		vty_out(vty, "Specified: %s is non-existent\n", vrf_name);
+		vty_out(vty, "Specified VRF: %s is non-existent\n", vrf_name);
 		return CMD_WARNING_CONFIG_FAILED;
 	}
 
@@ -320,13 +415,24 @@ DEFPY(pbr_map_nexthop, pbr_map_nexthop_cmd,
 	nhop.vrf_id = vrf->vrf_id;
 
 	if (intf) {
-		nhop.ifindex = ifname2ifindex(intf, vrf->vrf_id);
-		if (nhop.ifindex == IFINDEX_INTERNAL) {
-			vty_out(vty,
-				"Specified Intf %s does not exist in vrf: %s\n",
-				intf, vrf->name);
+		struct interface *ifp;
+
+		ifp = if_lookup_by_name_all_vrf(intf);
+		if (!ifp) {
+			vty_out(vty, "Specified Intf %s does not exist\n",
+				intf);
 			return CMD_WARNING_CONFIG_FAILED;
 		}
+		if (ifp->vrf_id != vrf->vrf_id) {
+			struct vrf *actual;
+
+			actual = vrf_lookup_by_id(ifp->vrf_id);
+			vty_out(vty,
+				"Specified Intf %s is not in vrf %s but is in vrf %s, using actual vrf\n",
+				ifp->name, vrf->name, actual->name);
+		}
+		nhop.ifindex = ifp->ifindex;
+		nhop.vrf_id = ifp->vrf_id;
 	}
 
 	if (addr) {
@@ -522,10 +628,36 @@ DEFPY (show_pbr,
 	return CMD_SUCCESS;
 }
 
+static void
+pbrms_nexthop_group_write_individual_nexthop(
+	struct vty *vty, const struct pbr_map_sequence *pbrms)
+{
+	struct pbr_nexthop_group_cache find;
+	struct pbr_nexthop_group_cache *pnhgc;
+	struct pbr_nexthop_cache lookup;
+	struct pbr_nexthop_cache *pnhc;
+
+	memset(&find, 0, sizeof(find));
+	strlcpy(find.name, pbrms->internal_nhg_name, sizeof(find.name));
+
+	pnhgc = hash_lookup(pbr_nhg_hash, &find);
+	assert(pnhgc);
+
+	lookup.nexthop = *pbrms->nhg->nexthop;
+	pnhc = hash_lookup(pnhgc->nhh, &lookup);
+
+	nexthop_group_write_nexthop_simple(
+		vty, pbrms->nhg->nexthop,
+		pnhc->nexthop.ifindex != 0 ? pnhc->intf_name : NULL);
+	if (pnhc->nexthop.vrf_id != VRF_DEFAULT)
+		vty_out(vty, " nexthop-vrf %s", pnhc->vrf_name);
+
+	vty_out(vty, "\n");
+}
+
 static void vty_show_pbrms(struct vty *vty,
 			   const struct pbr_map_sequence *pbrms, bool detail)
 {
-	char buf[PREFIX_STRLEN];
 	char rbuf[64];
 
 	if (pbrms->reason)
@@ -543,11 +675,15 @@ static void vty_show_pbrms(struct vty *vty,
 			pbrms->reason ? rbuf : "Valid");
 
 	if (pbrms->src)
-		vty_out(vty, "        SRC Match: %s\n",
-			prefix2str(pbrms->src, buf, sizeof(buf)));
+		vty_out(vty, "        SRC Match: %pFX\n", pbrms->src);
 	if (pbrms->dst)
-		vty_out(vty, "        DST Match: %s\n",
-			prefix2str(pbrms->dst, buf, sizeof(buf)));
+		vty_out(vty, "        DST Match: %pFX\n", pbrms->dst);
+	if (pbrms->dsfield & PBR_DSFIELD_DSCP)
+		vty_out(vty, "        DSCP Match: %u\n",
+			(pbrms->dsfield & PBR_DSFIELD_DSCP) >> 2);
+	if (pbrms->dsfield & PBR_DSFIELD_ECN)
+		vty_out(vty, "        ECN Match: %u\n",
+			pbrms->dsfield & PBR_DSFIELD_ECN);
 	if (pbrms->mark)
 		vty_out(vty, "        MARK Match: %u\n", pbrms->mark);
 
@@ -568,7 +704,7 @@ static void vty_show_pbrms(struct vty *vty,
 
 	} else if (pbrms->nhg) {
 		vty_out(vty, "        ");
-		nexthop_group_write_nexthop(vty, pbrms->nhg->nexthop);
+		pbrms_nexthop_group_write_individual_nexthop(vty, pbrms);
 		if (detail)
 			vty_out(vty,
 				"          Installed: %u(%d) Tableid: %d\n",
@@ -642,6 +778,12 @@ static void vty_json_pbrms(json_object *j, struct vty *vty,
 			prefix2str(pbrms->dst, buf, sizeof(buf)));
 	if (pbrms->mark)
 		json_object_int_add(jpbrm, "matchMark", pbrms->mark);
+	if (pbrms->dsfield & PBR_DSFIELD_DSCP)
+		json_object_int_add(jpbrm, "matchDscp",
+				    (pbrms->dsfield & PBR_DSFIELD_DSCP) >> 2);
+	if (pbrms->dsfield & PBR_DSFIELD_ECN)
+		json_object_int_add(jpbrm, "matchEcn",
+				    pbrms->dsfield & PBR_DSFIELD_ECN);
 
 	json_object_array_add(j, jpbrm);
 }
@@ -775,16 +917,22 @@ DEFPY (show_pbr_interface,
 			if (j)
 				this_iface = json_object_new_object();
 
-			if (!ifp->info)
+			if (!ifp->info) {
+				json_object_free(this_iface);
 				continue;
+			}
 
-			if (name && strcmp(ifp->name, name) != 0)
+			if (name && strcmp(ifp->name, name) != 0) {
+				json_object_free(this_iface);
 				continue;
+			}
 
 			pbr_ifp = ifp->info;
 
-			if (strcmp(pbr_ifp->mapname, "") == 0)
+			if (strcmp(pbr_ifp->mapname, "") == 0) {
+				json_object_free(this_iface);
 				continue;
+			}
 
 			pbrm = pbrm_find(pbr_ifp->mapname);
 
@@ -923,17 +1071,21 @@ static int pbr_vty_map_config_write_sequence(struct vty *vty,
 					     struct pbr_map *pbrm,
 					     struct pbr_map_sequence *pbrms)
 {
-	char buff[PREFIX_STRLEN];
-
 	vty_out(vty, "pbr-map %s seq %u\n", pbrm->name, pbrms->seqno);
 
 	if (pbrms->src)
-		vty_out(vty, " match src-ip %s\n",
-			prefix2str(pbrms->src, buff, sizeof(buff)));
+		vty_out(vty, " match src-ip %pFX\n", pbrms->src);
 
 	if (pbrms->dst)
-		vty_out(vty, " match dst-ip %s\n",
-			prefix2str(pbrms->dst, buff, sizeof(buff)));
+		vty_out(vty, " match dst-ip %pFX\n", pbrms->dst);
+
+	if (pbrms->dsfield & PBR_DSFIELD_DSCP)
+		vty_out(vty, " match dscp %u\n",
+			(pbrms->dsfield & PBR_DSFIELD_DSCP) >> 2);
+
+	if (pbrms->dsfield & PBR_DSFIELD_ECN)
+		vty_out(vty, " match ecn %u\n",
+			pbrms->dsfield & PBR_DSFIELD_ECN);
 
 	if (pbrms->mark)
 		vty_out(vty, " match mark %u\n", pbrms->mark);
@@ -949,7 +1101,7 @@ static int pbr_vty_map_config_write_sequence(struct vty *vty,
 
 	if (pbrms->nhg) {
 		vty_out(vty, " set ");
-		nexthop_group_write_nexthop(vty, pbrms->nhg->nexthop);
+		pbrms_nexthop_group_write_individual_nexthop(vty, pbrms);
 	}
 
 	vty_out(vty, "!\n");
@@ -1002,9 +1154,9 @@ void pbr_vty_init(void)
 
 	/* debug */
 	install_node(&debug_node);
-	install_element(VIEW_NODE, &debug_pbr_cmd);
+	install_element(ENABLE_NODE, &debug_pbr_cmd);
 	install_element(CONFIG_NODE, &debug_pbr_cmd);
-	install_element(VIEW_NODE, &show_debugging_pbr_cmd);
+	install_element(ENABLE_NODE, &show_debugging_pbr_cmd);
 
 	install_default(PBRMAP_NODE);
 
@@ -1015,6 +1167,8 @@ void pbr_vty_init(void)
 	install_element(INTERFACE_NODE, &pbr_policy_cmd);
 	install_element(PBRMAP_NODE, &pbr_map_match_src_cmd);
 	install_element(PBRMAP_NODE, &pbr_map_match_dst_cmd);
+	install_element(PBRMAP_NODE, &pbr_map_match_dscp_cmd);
+	install_element(PBRMAP_NODE, &pbr_map_match_ecn_cmd);
 	install_element(PBRMAP_NODE, &pbr_map_match_mark_cmd);
 	install_element(PBRMAP_NODE, &pbr_map_nexthop_group_cmd);
 	install_element(PBRMAP_NODE, &no_pbr_map_nexthop_group_cmd);

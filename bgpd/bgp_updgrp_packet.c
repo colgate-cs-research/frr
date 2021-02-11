@@ -88,39 +88,6 @@ void bpacket_queue_init(struct bpacket_queue *q)
 }
 
 /*
- * bpacket_queue_sanity_check
- */
-void bpacket_queue_sanity_check(struct bpacket_queue __attribute__((__unused__))
-				* q)
-{
-#if 0
-  struct bpacket *pkt;
-
-  pkt = bpacket_queue_last (q);
-  assert (pkt);
-  assert (!pkt->buffer);
-
-  /*
-   * Make sure the count of packets is correct.
-   */
-  int num_pkts = 0;
-
-  pkt = bpacket_queue_first (q);
-  while (pkt)
-    {
-      num_pkts++;
-
-      if (num_pkts > q->curr_count)
-	assert (0);
-
-      pkt = TAILQ_NEXT (pkt, pkt_train);
-    }
-
-  assert (num_pkts == q->curr_count);
-#endif
-}
-
-/*
  * bpacket_queue_add_packet
  *
  * Internal function of bpacket_queue - and adds a
@@ -168,7 +135,6 @@ struct bpacket *bpacket_queue_add(struct bpacket_queue *q, struct stream *s,
 		else
 			bpacket_attr_vec_arr_reset(&pkt->arr);
 		bpacket_queue_add_packet(q, pkt);
-		bpacket_queue_sanity_check(q);
 		return pkt;
 	}
 
@@ -176,7 +142,6 @@ struct bpacket *bpacket_queue_add(struct bpacket_queue *q, struct stream *s,
 	 * Fill in the new information into the current sentinel and create a
 	 * new sentinel.
 	 */
-	bpacket_queue_sanity_check(q);
 	last_pkt = bpacket_queue_last(q);
 	assert(last_pkt->buffer == NULL);
 	last_pkt->buffer = s;
@@ -190,7 +155,6 @@ struct bpacket *bpacket_queue_add(struct bpacket_queue *q, struct stream *s,
 	pkt->ver++;
 	bpacket_queue_add_packet(q, pkt);
 
-	bpacket_queue_sanity_check(q);
 	return last_pkt;
 }
 
@@ -290,7 +254,6 @@ static int bpacket_queue_compact(struct bpacket_queue *q)
 		num_deleted++;
 	}
 
-	bpacket_queue_sanity_check(q);
 	return num_deleted;
 }
 
@@ -489,11 +452,11 @@ struct stream *bpacket_reformat_for_peer(struct bpacket *pkt,
 
 		if (bgp_debug_update(peer, NULL, NULL, 0))
 			zlog_debug("u%" PRIu64 ":s%" PRIu64
-				   " %s send UPDATE w/ nexthop %s%s",
+				   " %s send UPDATE w/ nexthop %pI4%s",
 				   PAF_SUBGRP(paf)->update_group->id,
-				   PAF_SUBGRP(paf)->id, peer->host,
-				   inet_ntoa(*mod_v4nh),
-				   (nhlen == 12 ? " and RD" : ""));
+				   PAF_SUBGRP(paf)->id, peer->host, mod_v4nh,
+				   (nhlen == BGP_ATTR_NHLEN_VPNV4 ? " and RD"
+								  : ""));
 	} else if (nhafi == AFI_IP6) {
 		struct in6_addr v6nhglobal, *mod_v6nhg;
 		struct in6_addr v6nhlocal, *mod_v6nhl;
@@ -574,6 +537,18 @@ struct stream *bpacket_reformat_for_peer(struct bpacket *pkt,
 			gnh_modified = 1;
 		}
 
+		if (IN6_IS_ADDR_UNSPECIFIED(mod_v6nhg)) {
+			if (peer->nexthop.v4.s_addr != INADDR_ANY) {
+				ipv4_to_ipv4_mapped_ipv6(mod_v6nhg,
+							 peer->nexthop.v4);
+			}
+		}
+
+		if (IS_MAPPED_IPV6(&peer->nexthop.v6_global)) {
+			mod_v6nhg = &peer->nexthop.v6_global;
+			gnh_modified = 1;
+		}
+
 		if (nhlen == BGP_ATTR_NHLEN_IPV6_GLOBAL_AND_LL
 		    || nhlen == BGP_ATTR_NHLEN_VPNV6_GLOBAL_AND_LL) {
 			stream_get_from(&v6nhlocal, s, offset_nhlocal,
@@ -590,25 +565,28 @@ struct stream *bpacket_reformat_for_peer(struct bpacket *pkt,
 			stream_put_in6_addr_at(s, offset_nhlocal, mod_v6nhl);
 
 		if (bgp_debug_update(peer, NULL, NULL, 0)) {
-			if (nhlen == 32 || nhlen == 48)
+			if (nhlen == BGP_ATTR_NHLEN_IPV6_GLOBAL_AND_LL
+			    || nhlen == BGP_ATTR_NHLEN_VPNV6_GLOBAL_AND_LL)
 				zlog_debug(
-					"u%" PRIu64 ":s%" PRIu64
-					" %s send UPDATE w/ mp_nexthops %s, %s%s",
+					"u%" PRIu64 ":s%" PRIu64" %s send UPDATE w/ mp_nexthops %s, %s%s",
 					PAF_SUBGRP(paf)->update_group->id,
 					PAF_SUBGRP(paf)->id, peer->host,
 					inet_ntop(AF_INET6, mod_v6nhg, buf,
 						  BUFSIZ),
 					inet_ntop(AF_INET6, mod_v6nhl, buf2,
 						  BUFSIZ),
-					(nhlen == 48 ? " and RD" : ""));
+					(nhlen == BGP_ATTR_NHLEN_VPNV6_GLOBAL_AND_LL
+						 ? " and RD"
+						 : ""));
 			else
-				zlog_debug("u%" PRIu64 ":s%" PRIu64
-					   " %s send UPDATE w/ mp_nexthop %s%s",
+				zlog_debug("u%" PRIu64 ":s%" PRIu64" %s send UPDATE w/ mp_nexthop %s%s",
 					   PAF_SUBGRP(paf)->update_group->id,
 					   PAF_SUBGRP(paf)->id, peer->host,
 					   inet_ntop(AF_INET6, mod_v6nhg, buf,
 						     BUFSIZ),
-					   (nhlen == 24 ? " and RD" : ""));
+					   (nhlen == BGP_ATTR_NHLEN_VPNV6_GLOBAL
+						    ? " and RD"
+						    : ""));
 		}
 	} else if (paf->afi == AFI_L2VPN) {
 		struct in_addr v4nh, *mod_v4nh;
@@ -628,10 +606,9 @@ struct stream *bpacket_reformat_for_peer(struct bpacket *pkt,
 
 		if (bgp_debug_update(peer, NULL, NULL, 0))
 			zlog_debug("u%" PRIu64 ":s%" PRIu64
-				   " %s send UPDATE w/ nexthop %s",
+				   " %s send UPDATE w/ nexthop %pI4",
 				   PAF_SUBGRP(paf)->update_group->id,
-				   PAF_SUBGRP(paf)->id, peer->host,
-				   inet_ntoa(*mod_v4nh));
+				   PAF_SUBGRP(paf)->id, peer->host, mod_v4nh);
 	}
 
 	return s;
@@ -685,7 +662,7 @@ struct bpacket *subgroup_update_packet(struct update_subgroup *subgrp)
 	struct stream *packet;
 	struct bgp_adj_out *adj;
 	struct bgp_advertise *adv;
-	struct bgp_node *rn = NULL;
+	struct bgp_dest *dest = NULL;
 	struct bgp_path_info *path = NULL;
 	bgp_size_t total_attr_len = 0;
 	unsigned long attrlen_pos = 0;
@@ -726,11 +703,11 @@ struct bpacket *subgroup_update_packet(struct update_subgroup *subgrp)
 
 	adv = bgp_adv_fifo_first(&subgrp->sync->update);
 	while (adv) {
-		const struct prefix *rn_p;
+		const struct prefix *dest_p;
 
-		assert(adv->rn);
-		rn = adv->rn;
-		rn_p = bgp_node_get_prefix(rn);
+		assert(adv->dest);
+		dest = adv->dest;
+		dest_p = bgp_dest_get_prefix(dest);
 		adj = adv->adj;
 		addpath_tx_id = adj->addpath_tx_id;
 		path = adv->pathi;
@@ -744,8 +721,7 @@ struct bpacket *subgroup_update_packet(struct update_subgroup *subgrp)
 			if (BGP_DEBUG(update, UPDATE_OUT)
 			    || BGP_DEBUG(update, UPDATE_PREFIX)) {
 				zlog_debug(
-					"%s reached maximum prefix to be send (%" PRIu32
-					")",
+					"%s reached maximum prefix to be send (%u)",
 					peer->host, peer->pmax_out[afi][safi]);
 			}
 			goto next;
@@ -753,8 +729,9 @@ struct bpacket *subgroup_update_packet(struct update_subgroup *subgrp)
 
 		space_remaining = STREAM_CONCAT_REMAIN(s, snlri, STREAM_SIZE(s))
 				  - BGP_MAX_PACKET_SIZE_OVERFLOW;
-		space_needed = BGP_NLRI_LENGTH + addpath_overhead
-			       + bgp_packet_mpattr_prefix_size(afi, safi, rn_p);
+		space_needed =
+			BGP_NLRI_LENGTH + addpath_overhead
+			+ bgp_packet_mpattr_prefix_size(afi, safi, dest_p);
 
 		/* When remaining space can't include NLRI and it's length.  */
 		if (space_remaining < space_needed)
@@ -800,7 +777,7 @@ struct bpacket *subgroup_update_packet(struct update_subgroup *subgrp)
 				- BGP_MAX_PACKET_SIZE_OVERFLOW;
 			space_needed = BGP_NLRI_LENGTH + addpath_overhead
 				       + bgp_packet_mpattr_prefix_size(
-					       afi, safi, rn_p);
+					       afi, safi, dest_p);
 
 			/* If the attributes alone do not leave any room for
 			 * NLRI then
@@ -808,8 +785,7 @@ struct bpacket *subgroup_update_packet(struct update_subgroup *subgrp)
 			if (space_remaining < space_needed) {
 				flog_err(
 					EC_BGP_UPDGRP_ATTR_LEN,
-					"u%" PRIu64 ":s%" PRIu64
-					" attributes too long, cannot send UPDATE",
+					"u%" PRIu64 ":s%" PRIu64" attributes too long, cannot send UPDATE",
 					subgrp->update_group->id, subgrp->id);
 
 				/* Flush the FIFO update queue */
@@ -824,22 +800,22 @@ struct bpacket *subgroup_update_packet(struct update_subgroup *subgrp)
 				memset(send_attr_str, 0, BUFSIZ);
 				send_attr_printed = 0;
 				bgp_dump_attr(adv->baa->attr, send_attr_str,
-					      BUFSIZ);
+					      sizeof(send_attr_str));
 			}
 		}
 
 		if ((afi == AFI_IP && safi == SAFI_UNICAST)
 		    && !peer_cap_enhe(peer, afi, safi))
-			stream_put_prefix_addpath(s, rn_p, addpath_encode,
+			stream_put_prefix_addpath(s, dest_p, addpath_encode,
 						  addpath_tx_id);
 		else {
 			/* Encode the prefix in MP_REACH_NLRI attribute */
-			if (rn->prn)
-				prd = (struct prefix_rd *)bgp_node_get_prefix(
-					rn->prn);
+			if (dest->pdest)
+				prd = (struct prefix_rd *)bgp_dest_get_prefix(
+					dest->pdest);
 
 			if (safi == SAFI_LABELED_UNICAST) {
-				label = bgp_adv_label(rn, path, peer, afi,
+				label = bgp_adv_label(dest, path, peer, afi,
 						      safi);
 				label_pnt = &label;
 				num_labels = 1;
@@ -853,7 +829,7 @@ struct bpacket *subgroup_update_packet(struct update_subgroup *subgrp)
 					snlri, peer, afi, safi, &vecarr,
 					adv->baa->attr);
 
-			bgp_packet_mpattr_prefix(snlri, afi, safi, rn_p, prd,
+			bgp_packet_mpattr_prefix(snlri, afi, safi, dest_p, prd,
 						 label_pnt, num_labels,
 						 addpath_encode, addpath_tx_id,
 						 adv->baa->attr);
@@ -861,12 +837,11 @@ struct bpacket *subgroup_update_packet(struct update_subgroup *subgrp)
 
 		num_pfx++;
 
-		if (bgp_debug_update(NULL, rn_p, subgrp->update_group, 0)) {
+		if (bgp_debug_update(NULL, dest_p, subgrp->update_group, 0)) {
 			char pfx_buf[BGP_PRD_PATH_STRLEN];
 
 			if (!send_attr_printed) {
-				zlog_debug("u%" PRIu64 ":s%" PRIu64
-					   " send UPDATE w/ attr: %s",
+				zlog_debug("u%" PRIu64 ":s%" PRIu64" send UPDATE w/ attr: %s",
 					   subgrp->update_group->id, subgrp->id,
 					   send_attr_str);
 				if (!stream_empty(snlri)) {
@@ -877,18 +852,20 @@ struct bpacket *subgroup_update_packet(struct update_subgroup *subgrp)
 					pkt_safi = safi_int2iana(safi);
 					zlog_debug(
 						"u%" PRIu64 ":s%" PRIu64
-						" send MP_REACH for afi/safi %d/%d",
+						" send MP_REACH for afi/safi %s/%s",
 						subgrp->update_group->id,
-						subgrp->id, pkt_afi, pkt_safi);
+						subgrp->id,
+						iana_afi2str(pkt_afi),
+						iana_safi2str(pkt_safi));
 				}
 
 				send_attr_printed = 1;
 			}
 
-			bgp_debug_rdpfxpath2str(afi, safi, prd, rn_p, label_pnt,
-						num_labels, addpath_encode,
-						addpath_tx_id, pfx_buf,
-						sizeof(pfx_buf));
+			bgp_debug_rdpfxpath2str(afi, safi, prd, dest_p,
+						label_pnt, num_labels,
+						addpath_encode, addpath_tx_id,
+						pfx_buf, sizeof(pfx_buf));
 			zlog_debug("u%" PRIu64 ":s%" PRIu64 " send UPDATE %s",
 				   subgrp->update_group->id, subgrp->id,
 				   pfx_buf);
@@ -921,8 +898,7 @@ next:
 			packet = stream_dup(s);
 		bgp_packet_set_size(packet);
 		if (bgp_debug_update(NULL, NULL, subgrp->update_group, 0))
-			zlog_debug("u%" PRIu64 ":s%" PRIu64
-				   " send UPDATE len %zd numpfx %d",
+			zlog_debug("u%" PRIu64 ":s%" PRIu64" send UPDATE len %zd numpfx %d",
 				   subgrp->update_group->id, subgrp->id,
 				   (stream_get_endp(packet)
 				    - stream_get_getp(packet)),
@@ -952,7 +928,7 @@ struct bpacket *subgroup_withdraw_packet(struct update_subgroup *subgrp)
 	struct bgp_adj_out *adj;
 	struct bgp_advertise *adv;
 	struct peer *peer;
-	struct bgp_node *rn;
+	struct bgp_dest *dest;
 	bgp_size_t unfeasible_len;
 	bgp_size_t total_attr_len;
 	size_t mp_start = 0;
@@ -985,19 +961,19 @@ struct bpacket *subgroup_withdraw_packet(struct update_subgroup *subgrp)
 	addpath_overhead = addpath_encode ? BGP_ADDPATH_ID_LEN : 0;
 
 	while ((adv = bgp_adv_fifo_first(&subgrp->sync->withdraw)) != NULL) {
-		const struct prefix *rn_p;
+		const struct prefix *dest_p;
 
-		assert(adv->rn);
+		assert(adv->dest);
 		adj = adv->adj;
-		rn = adv->rn;
-		rn_p = bgp_node_get_prefix(rn);
+		dest = adv->dest;
+		dest_p = bgp_dest_get_prefix(dest);
 		addpath_tx_id = adj->addpath_tx_id;
 
 		space_remaining =
 			STREAM_WRITEABLE(s) - BGP_MAX_PACKET_SIZE_OVERFLOW;
-		space_needed = BGP_NLRI_LENGTH + addpath_overhead
-			       + BGP_TOTAL_ATTR_LEN
-			       + bgp_packet_mpattr_prefix_size(afi, safi, rn_p);
+		space_needed =
+			BGP_NLRI_LENGTH + addpath_overhead + BGP_TOTAL_ATTR_LEN
+			+ bgp_packet_mpattr_prefix_size(afi, safi, dest_p);
 
 		if (space_remaining < space_needed)
 			break;
@@ -1010,12 +986,12 @@ struct bpacket *subgroup_withdraw_packet(struct update_subgroup *subgrp)
 
 		if (afi == AFI_IP && safi == SAFI_UNICAST
 		    && !peer_cap_enhe(peer, afi, safi))
-			stream_put_prefix_addpath(s, rn_p, addpath_encode,
+			stream_put_prefix_addpath(s, dest_p, addpath_encode,
 						  addpath_tx_id);
 		else {
-			if (rn->prn)
-				prd = (struct prefix_rd *)bgp_node_get_prefix(
-					rn->prn);
+			if (dest->pdest)
+				prd = (struct prefix_rd *)bgp_dest_get_prefix(
+					dest->pdest);
 
 			/* If first time, format the MP_UNREACH header
 			 */
@@ -1037,34 +1013,34 @@ struct bpacket *subgroup_withdraw_packet(struct update_subgroup *subgrp)
 						     subgrp->update_group, 0))
 					zlog_debug(
 						"u%" PRIu64 ":s%" PRIu64
-						" send MP_UNREACH for afi/safi %d/%d",
+						" send MP_UNREACH for afi/safi %s/%s",
 						subgrp->update_group->id,
-						subgrp->id, pkt_afi, pkt_safi);
+						subgrp->id,
+						iana_afi2str(pkt_afi),
+						iana_safi2str(pkt_safi));
 			}
 
-			bgp_packet_mpunreach_prefix(s, rn_p, afi, safi, prd,
+			bgp_packet_mpunreach_prefix(s, dest_p, afi, safi, prd,
 						    NULL, 0, addpath_encode,
 						    addpath_tx_id, NULL);
 		}
 
 		num_pfx++;
 
-		if (bgp_debug_update(NULL, rn_p, subgrp->update_group, 0)) {
+		if (bgp_debug_update(NULL, dest_p, subgrp->update_group, 0)) {
 			char pfx_buf[BGP_PRD_PATH_STRLEN];
 
-			bgp_debug_rdpfxpath2str(afi, safi, prd, rn_p, NULL, 0,
+			bgp_debug_rdpfxpath2str(afi, safi, prd, dest_p, NULL, 0,
 						addpath_encode, addpath_tx_id,
 						pfx_buf, sizeof(pfx_buf));
-			zlog_debug("u%" PRIu64 ":s%" PRIu64
-				   " send UPDATE %s -- unreachable",
+			zlog_debug("u%" PRIu64 ":s%" PRIu64" send UPDATE %s -- unreachable",
 				   subgrp->update_group->id, subgrp->id,
 				   pfx_buf);
 		}
 
 		subgrp->scount--;
 
-		bgp_adj_out_remove_subgroup(rn, adj, subgrp);
-		bgp_unlock_node(rn);
+		bgp_adj_out_remove_subgroup(dest, adj, subgrp);
 	}
 
 	if (!stream_empty(s)) {
@@ -1084,8 +1060,7 @@ struct bpacket *subgroup_withdraw_packet(struct update_subgroup *subgrp)
 		}
 		bgp_packet_set_size(s);
 		if (bgp_debug_update(NULL, NULL, subgrp->update_group, 0))
-			zlog_debug("u%" PRIu64 ":s%" PRIu64
-				   " send UPDATE (withdraw) len %zd numpfx %d",
+			zlog_debug("u%" PRIu64 ":s%" PRIu64" send UPDATE (withdraw) len %zd numpfx %d",
 				   subgrp->update_group->id, subgrp->id,
 				   (stream_get_endp(s) - stream_get_getp(s)),
 				   num_pfx);
@@ -1130,7 +1105,6 @@ void subgroup_default_update_packet(struct update_subgroup *subgrp,
 	/* Logging the attribute. */
 	if (bgp_debug_update(NULL, &p, subgrp->update_group, 0)) {
 		char attrstr[BUFSIZ];
-		char buf[PREFIX_STRLEN];
 		/* ' with addpath ID '          17
 		 * max strlen of uint32       + 10
 		 * +/- (just in case)         +  1
@@ -1140,7 +1114,7 @@ void subgroup_default_update_packet(struct update_subgroup *subgrp,
 
 		attrstr[0] = '\0';
 
-		bgp_dump_attr(attr, attrstr, BUFSIZ);
+		bgp_dump_attr(attr, attrstr, sizeof(attrstr));
 
 		if (addpath_encode)
 			snprintf(tx_id_buf, sizeof(tx_id_buf),
@@ -1149,10 +1123,9 @@ void subgroup_default_update_packet(struct update_subgroup *subgrp,
 		else
 			tx_id_buf[0] = '\0';
 
-		zlog_debug("u%" PRIu64 ":s%" PRIu64 " send UPDATE %s%s %s",
-			   (SUBGRP_UPDGRP(subgrp))->id, subgrp->id,
-			   prefix2str(&p, buf, sizeof(buf)), tx_id_buf,
-			   attrstr);
+		zlog_debug("u%" PRIu64 ":s%" PRIu64 " send UPDATE %pFX%s %s",
+			   (SUBGRP_UPDGRP(subgrp))->id, subgrp->id, &p,
+			   tx_id_buf, attrstr);
 	}
 
 	s = stream_new(BGP_MAX_PACKET_SIZE);
@@ -1215,7 +1188,6 @@ void subgroup_default_withdraw_packet(struct update_subgroup *subgrp)
 	p.prefixlen = 0;
 
 	if (bgp_debug_update(NULL, &p, subgrp->update_group, 0)) {
-		char buf[PREFIX_STRLEN];
 		/* ' with addpath ID '          17
 		 * max strlen of uint32       + 10
 		 * +/- (just in case)         +  1
@@ -1229,9 +1201,9 @@ void subgroup_default_withdraw_packet(struct update_subgroup *subgrp)
 				 BGP_ADDPATH_TX_ID_FOR_DEFAULT_ORIGINATE);
 
 		zlog_debug("u%" PRIu64 ":s%" PRIu64
-			   " send UPDATE %s%s -- unreachable",
-			   (SUBGRP_UPDGRP(subgrp))->id, subgrp->id,
-			   prefix2str(&p, buf, sizeof(buf)), tx_id_buf);
+			   " send UPDATE %pFX%s -- unreachable",
+			   (SUBGRP_UPDGRP(subgrp))->id, subgrp->id, &p,
+			   tx_id_buf);
 	}
 
 	s = stream_new(BGP_MAX_PACKET_SIZE);

@@ -32,6 +32,8 @@ import re
 import sys
 import pytest
 import json
+import platform
+from functools import partial
 
 # Save the Current Working Directory to find configuration files.
 CWD = os.path.dirname(os.path.realpath(__file__))
@@ -78,14 +80,19 @@ class NetworkTopo(Topo):
 ##
 #####################################################
 
-
+@pytest.mark.pbr
 def setup_module(module):
     "Setup topology"
     tgen = Topogen(NetworkTopo, module.__name__)
     tgen.start_topology()
 
+    krel = platform.release()
+    if topotest.version_cmp(krel, "4.10") < 0:
+        tgen.errors = "Newer kernel than 4.9 needed for pbr tests"
+        pytest.skip(tgen.errors)
+
     router_list = tgen.routers()
-    for rname, router in router_list.iteritems():
+    for rname, router in router_list.items():
         # Install vrf into the kernel and slave eth3
         router.run("ip link add vrf-chiyoda type vrf table 1000")
         router.run("ip link set dev {}-eth3 master vrf-chiyoda".format(rname))
@@ -140,9 +147,14 @@ def test_pbr_data():
         expected = json.loads(open(intf_file).read())
 
         # Actual output from router
-        actual = router.vtysh_cmd("show pbr interface json", isjson=True)
+        test_func = partial(
+            topotest.router_json_cmp, router, "show pbr interface json", expected
+        )
+        _, result = topotest.run_and_expect(test_func, None, count=30, wait=1)
         assertmsg = '"show pbr interface" mismatches on {}'.format(router.name)
-        assert topotest.json_cmp(actual, expected) is None, assertmsg
+        if result is not None:
+            gather_pbr_data_on_error(router)
+            assert result is None, assertmsg
 
         map_file = "{}/{}/pbr-map.json".format(CWD, router.name)
         logger.info(map_file)
@@ -151,10 +163,14 @@ def test_pbr_data():
         expected = json.loads(open(map_file).read())
 
         # Actual output from router
-        actual = router.vtysh_cmd("show pbr map json", isjson=True)
-
+        test_func = partial(
+            topotest.router_json_cmp, router, "show pbr map json", expected
+        )
+        _, result = topotest.run_and_expect(test_func, None, count=30, wait=1)
         assertmsg = '"show pbr map" mismatches on {}'.format(router.name)
-        assert topotest.json_cmp(actual, expected) is None, assertmsg
+        if result is not None:
+            gather_pbr_data_on_error(router)
+            assert result is None, assertmsg
 
         nexthop_file = "{}/{}/pbr-nexthop-groups.json".format(CWD, router.name)
         logger.info(nexthop_file)
@@ -163,10 +179,14 @@ def test_pbr_data():
         expected = json.loads(open(nexthop_file).read())
 
         # Actual output from router
-        actual = router.vtysh_cmd("show pbr nexthop-groups json", isjson=True)
-
+        test_func = partial(
+            topotest.router_json_cmp, router, "show pbr nexthop-groups json", expected
+        )
+        _, result = topotest.run_and_expect(test_func, None, count=30, wait=1)
         assertmsg = '"show pbr nexthop-groups" mismatches on {}'.format(router.name)
-        assert topotest.json_cmp(actual, expected) is None, assertmsg
+        if result is not None:
+            gather_pbr_data_on_error(router)
+            assert result is None, assertmsg
 
 
 def test_pbr_flap():
@@ -199,10 +219,14 @@ def test_pbr_flap():
         expected = json.loads(open(intf_file).read())
 
         # Actual output from router
-        actual = router.vtysh_cmd("show pbr interface json", isjson=True)
+        test_func = partial(
+            topotest.router_json_cmp, router, "show pbr interface json", expected
+        )
+        _, result = topotest.run_and_expect(test_func, None, count=30, wait=1)
         assertmsg = '"show pbr interface" mismatches on {}'.format(router.name)
-
-        assert topotest.json_cmp(actual, expected) is None, assertmsg
+        if result is not None:
+            gather_pbr_data_on_error(router)
+            assert result is None, assertmsg
 
 
 def test_rule_linux_installation():
@@ -229,3 +253,33 @@ def test_rule_linux_installation():
 if __name__ == "__main__":
     args = ["-s"] + sys.argv[1:]
     sys.exit(pytest.main(args))
+
+#
+# EXTRA SAUCE
+#
+def gather_pbr_data_on_error(router):
+    logger.info(router.vtysh_cmd("show ip route"))
+    logger.info(router.vtysh_cmd("show ip route vrf vrf-chiyoda"))
+    logger.info(router.vtysh_cmd("show ip nht"))
+    logger.info(router.vtysh_cmd("show pbr interface"))
+    logger.info(router.vtysh_cmd("show pbr map"))
+    logger.info(router.vtysh_cmd("show pbr nexthop-groups"))
+    logger.info(router.vtysh_cmd("show nexthop-group rib singleton ip"))
+    logger.info(router.vtysh_cmd("show nexthop-group rib singleton ipv6"))
+    logger.info(router.vtysh_cmd("show nexthop-group rib"))
+    logger.info(router.run("ip nexthop show"))
+    logger.info(router.run("ip route show"))
+    logger.info(router.run("ip route show table 1000"))
+    logger.info(router.run("ip route show table 10000"))
+    logger.info(router.run("ip -6 route show table 10000"))
+    logger.info(router.run("ip route show table 10001"))
+    logger.info(router.run("ip -6 route show table 10001"))
+    logger.info(router.run("ip route show table 10002"))
+    logger.info(router.run("ip -6 route show table 10002"))
+    logger.info(router.run("ip route show table 10003"))
+    logger.info(router.run("ip -6 route show table 10003"))
+    logger.info(router.run("ip route show table 10004"))
+    logger.info(router.run("ip -6 route show table 10004"))
+    logger.info(router.run("ip route show table 10005"))
+    logger.info(router.run("ip -6 route show table 10005"))
+    logger.info(router.run("ip rule show"))

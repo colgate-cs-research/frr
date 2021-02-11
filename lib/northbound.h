@@ -258,6 +258,12 @@ struct nb_cb_rpc_args {
 
 	/* List of output parameters to be populated by the callback. */
 	struct list *output;
+
+	/* Buffer to store human-readable error message in case of error. */
+	char *errmsg;
+
+	/* Size of errmsg. */
+	size_t errmsg_len;
 };
 
 /*
@@ -546,7 +552,7 @@ struct nb_node {
  * from working properly on shared libraries. For those compilers, use a fixed
  * size array to work around the problem.
  */
-#define YANG_MODULE_MAX_NODES 1024
+#define YANG_MODULE_MAX_NODES 2000
 
 struct frr_yang_module_info {
 	/* YANG module name. */
@@ -594,6 +600,7 @@ enum nb_client {
 	NB_CLIENT_CONFD,
 	NB_CLIENT_SYSREPO,
 	NB_CLIENT_GRPC,
+	NB_CLIENT_PCEP,
 };
 
 /* Northbound context. */
@@ -615,6 +622,8 @@ struct nb_context {
 		} sysrepo;
 		struct {
 		} grpc;
+		struct {
+		} pcep;
 	} client_data;
 #endif
 };
@@ -689,7 +698,8 @@ extern const void *nb_callback_lookup_entry(const struct nb_node *nb_node,
 					    const void *parent_list_entry,
 					    const struct yang_list_keys *keys);
 extern int nb_callback_rpc(const struct nb_node *nb_node, const char *xpath,
-			   const struct list *input, struct list *output);
+			   const struct list *input, struct list *output,
+			   char *errmsg, size_t errmsg_len);
 
 /*
  * Create a northbound node for all YANG schema nodes.
@@ -910,8 +920,15 @@ extern int nb_candidate_commit_prepare(struct nb_context *context,
  *
  * transaction
  *    Candidate configuration to abort. It's consumed by this function.
+ *
+ * errmsg
+ *    Buffer to store human-readable error message in case of error.
+ *
+ * errmsg_len
+ *    Size of errmsg.
  */
-extern void nb_candidate_commit_abort(struct nb_transaction *transaction);
+extern void nb_candidate_commit_abort(struct nb_transaction *transaction,
+				      char *errmsg, size_t errmsg_len);
 
 /*
  * Commit a previously created configuration transaction.
@@ -925,10 +942,17 @@ extern void nb_candidate_commit_abort(struct nb_transaction *transaction);
  *
  * transaction_id
  *    Optional output parameter providing the ID of the committed transaction.
+ *
+ * errmsg
+ *    Buffer to store human-readable error message in case of error.
+ *
+ * errmsg_len
+ *    Size of errmsg.
  */
 extern void nb_candidate_commit_apply(struct nb_transaction *transaction,
 				      bool save_transaction,
-				      uint32_t *transaction_id);
+				      uint32_t *transaction_id, char *errmsg,
+				      size_t errmsg_len);
 
 /*
  * Create a new transaction to commit a candidate configuration. This is a
@@ -1165,6 +1189,14 @@ extern void *nb_running_get_entry(const struct lyd_node *dnode,
 				  const char *xpath, bool abort_if_not_found);
 
 /*
+ * Same as 'nb_running_get_entry', but doesn't search within parent nodes
+ * recursively if an user point is not found.
+ */
+extern void *nb_running_get_entry_non_rec(const struct lyd_node *dnode,
+					  const char *xpath,
+					  bool abort_if_not_found);
+
+/*
  * Return a human-readable string representing a northbound event.
  *
  * event
@@ -1209,6 +1241,29 @@ extern const char *nb_err_name(enum nb_error error);
 extern const char *nb_client_name(enum nb_client client);
 
 /*
+ * Validate all northbound callbacks.
+ *
+ * Some errors, like missing callbacks or invalid priorities, are fatal and
+ * can't be recovered from. Other errors, like unneeded callbacks, are logged
+ * but otherwise ignored.
+ *
+ * Whenever a YANG module is loaded after startup, *all* northbound callbacks
+ * need to be validated and not only the callbacks from the newly loaded module.
+ * This is because augmentations can change the properties of the augmented
+ * module, making mandatory the implementation of additional callbacks.
+ */
+void nb_validate_callbacks(void);
+
+/*
+ * Load a YANG module with its corresponding northbound callbacks.
+ *
+ * module_info
+ *    Pointer to structure containing the module name and its northbound
+ *    callbacks.
+ */
+void nb_load_module(const struct frr_yang_module_info *module_info);
+
+/*
  * Initialize the northbound layer. Should be called only once during the
  * daemon initialization process.
  *
@@ -1217,10 +1272,13 @@ extern const char *nb_client_name(enum nb_client client);
  *
  * nmodules
  *    Size of the modules array.
+ *
+ * db_enabled
+ *    Set this to record the transactions in the transaction log.
  */
 extern void nb_init(struct thread_master *tm,
 		    const struct frr_yang_module_info *const modules[],
-		    size_t nmodules);
+		    size_t nmodules, bool db_enabled);
 
 /*
  * Finish the northbound layer gracefully. Should be called only when the daemon

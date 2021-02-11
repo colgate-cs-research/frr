@@ -276,7 +276,7 @@ Pre-submission Checklist
 - In the case of a major new feature or other significant change, document
   plans for continued maintenance of the feature.  In addition it is a
   requirement that automated testing must be written that exercises
-  the new feature within our existing CI infrastructure.  Also the 
+  the new feature within our existing CI infrastructure.  Also the
   addition of automated testing to cover any pull request is encouraged.
 
 .. _signing-off:
@@ -573,6 +573,30 @@ following requirements have achieved consensus:
   constant in these cases.  (Rationale:  changing a buffer to another size
   constant may leave the write operations on a now-incorrect size limit.)
 
+- For stack allocated structs and arrays that should be zero initialized,
+  prefer initializer expressions over ``memset()`` wherever possible. This
+  helps prevent ``memset()`` calls being missed in branches, and eliminates the
+  error class of an incorrect ``size`` argument to ``memset()``.
+
+  For example, instead of:
+
+  .. code-block:: c
+
+     struct foo mystruct;
+     ...
+     memset(&mystruct, 0x00, sizeof(struct foo));
+
+  Prefer:
+
+  .. code-block:: c
+
+     struct foo mystruct = {};
+
+- Do not zero initialize stack allocated values that must be initialized with a
+  nonzero value in order to be used. This way the compiler and memory checking
+  tools can catch uninitialized value use that would otherwise be suppressed by
+  the (incorrect) zero initialization.
+
 Other than these specific rules, coding practices from the Linux kernel as
 well as CERT or MISRA C guidelines may provide useful input on safe C code.
 However, these rules are not applied as-is;  some of them expressly collide
@@ -755,13 +779,12 @@ necessary replacements.
 .. _style-exceptions:
 
 Exceptions
-^^^^^^^^^^
+""""""""""
 
 FRR project code comes from a variety of sources, so there are some
 stylistic exceptions in place. They are organized here by branch.
 
-For ``master``
-""""""""""""""
+For ``master``:
 
 BSD coding style applies to:
 
@@ -773,8 +796,7 @@ BSD coding style applies to:
 -  Indents are 4 spaces
 -  Function return types are on their own line
 
-For ``stable/3.0`` and ``stable/2.0``
-"""""""""""""""""""""""""""""""""""""
+For ``stable/3.0`` and ``stable/2.0``:
 
 GNU coding style apply to the following parts:
 
@@ -791,6 +813,21 @@ GNU coding style apply to the following parts:
 BSD coding style applies to:
 
 -  ``ldpd/``
+
+
+Python Code
+^^^^^^^^^^^
+
+Format all Python code with `black <https://github.com/psf/black>`_.
+
+In a line::
+
+   python3 -m black <file.py>
+
+Run this on any Python files you modify before committing.
+
+FRR's Python code has been formatted with black version 19.10b.
+
 
 YANG
 ^^^^
@@ -1034,7 +1071,9 @@ the development mailing list / public Slack instance.
 JSON Output
 ^^^^^^^^^^^
 
-All JSON keys are to be camelCased, with no spaces.
+* All JSON keys are to be camelCased, with no spaces
+* Commands which output JSON should produce ``{}`` if they have nothing to
+  display
 
 Use of const
 ^^^^^^^^^^^^
@@ -1222,6 +1261,9 @@ When documented this way, CLI commands can be cross referenced with the
 
 This is very helpful for users who want to quickly remind themselves what a
 particular command does.
+
+When documenting a cli that has a ``no`` form, please do not include
+the ``no`` in the ``.. index::`` line.
 
 Configuration Snippets
 ^^^^^^^^^^^^^^^^^^^^^^

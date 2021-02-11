@@ -109,12 +109,6 @@ struct bpacket {
 struct bpacket_queue {
 	TAILQ_HEAD(pkt_queue, bpacket) pkts;
 
-#if 0
-  /* A dummy packet that is used to thread all peers that have
-     completed their work */
-  struct bpacket sentinel;
-#endif
-
 	unsigned int conf_max_count;
 	unsigned int curr_count;
 	unsigned int hwm_count;
@@ -252,18 +246,12 @@ struct update_subgroup {
 	uint64_t id;
 
 	uint16_t sflags;
+#define SUBGRP_STATUS_DEFAULT_ORIGINATE (1 << 0)
+#define SUBGRP_STATUS_FORCE_UPDATES (1 << 1)
 
-	/* Subgroup flags, see below  */
 	uint16_t flags;
+#define SUBGRP_FLAG_NEEDS_REFRESH (1 << 0)
 };
-
-/*
- * We need to do an outbound refresh to get this subgroup into a
- * consistent state.
- */
-#define SUBGRP_FLAG_NEEDS_REFRESH         (1 << 0)
-
-#define SUBGRP_STATUS_DEFAULT_ORIGINATE   (1 << 0)
 
 /*
  * Add the given value to the specified counter on a subgroup and its
@@ -292,7 +280,7 @@ typedef int (*updgrp_walkcb)(struct update_group *updgrp, void *ctx);
 /* really a private structure */
 struct updwalk_context {
 	struct vty *vty;
-	struct bgp_node *rn;
+	struct bgp_dest *dest;
 	struct bgp_path_info *pi;
 	uint64_t updgrp_id;
 	uint64_t subgrp_id;
@@ -442,22 +430,23 @@ extern void subgroup_announce_all(struct update_subgroup *subgrp);
 extern void subgroup_default_originate(struct update_subgroup *subgrp,
 				       int withdraw);
 extern void group_announce_route(struct bgp *bgp, afi_t afi, safi_t safi,
-				 struct bgp_node *rn, struct bgp_path_info *pi);
+				 struct bgp_dest *dest,
+				 struct bgp_path_info *pi);
 extern void subgroup_clear_table(struct update_subgroup *subgrp);
 extern void update_group_announce(struct bgp *bgp);
 extern void update_group_announce_rrclients(struct bgp *bgp);
 extern void peer_af_announce_route(struct peer_af *paf, int combine);
 extern struct bgp_adj_out *bgp_adj_out_alloc(struct update_subgroup *subgrp,
-					     struct bgp_node *rn,
+					     struct bgp_dest *dest,
 					     uint32_t addpath_tx_id);
-extern void bgp_adj_out_remove_subgroup(struct bgp_node *rn,
+extern void bgp_adj_out_remove_subgroup(struct bgp_dest *dest,
 					struct bgp_adj_out *adj,
 					struct update_subgroup *subgrp);
-extern void bgp_adj_out_set_subgroup(struct bgp_node *rn,
+extern void bgp_adj_out_set_subgroup(struct bgp_dest *dest,
 				     struct update_subgroup *subgrp,
 				     struct attr *attr,
 				     struct bgp_path_info *path);
-extern void bgp_adj_out_unset_subgroup(struct bgp_node *rn,
+extern void bgp_adj_out_unset_subgroup(struct bgp_dest *dest,
 				       struct update_subgroup *subgrp,
 				       char withdraw, uint32_t addpath_tx_id);
 void subgroup_announce_table(struct update_subgroup *subgrp,

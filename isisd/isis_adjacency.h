@@ -113,8 +113,8 @@ struct isis_adjacency *isis_adj_lookup(const uint8_t *sysid,
 				       struct list *adjdb);
 struct isis_adjacency *isis_adj_lookup_snpa(const uint8_t *ssnpa,
 					    struct list *adjdb);
-bool isis_adj_exists(const struct isis_area *area, int level,
-		     const uint8_t *sysid);
+struct isis_adjacency *isis_adj_find(const struct isis_area *area, int level,
+				     const uint8_t *sysid);
 struct isis_adjacency *isis_new_adj(const uint8_t *id, const uint8_t *snpa,
 				    int level, struct isis_circuit *circuit);
 void isis_delete_adj(void *adj);
@@ -126,6 +126,9 @@ DECLARE_HOOK(isis_adj_ip_enabled_hook,
 	     (struct isis_adjacency *adj, int family), (adj, family))
 DECLARE_HOOK(isis_adj_ip_disabled_hook,
 	     (struct isis_adjacency *adj, int family), (adj, family))
+void isis_log_adj_change(struct isis_adjacency *adj,
+			 enum isis_adj_state old_state,
+			 enum isis_adj_state new_state, const char *reason);
 void isis_adj_state_change(struct isis_adjacency **adj,
 			   enum isis_adj_state state, const char *reason);
 void isis_adj_print(struct isis_adjacency *adj);
@@ -136,5 +139,6 @@ void isis_adj_print_vty(struct isis_adjacency *adj, struct vty *vty,
 void isis_adj_build_neigh_list(struct list *adjdb, struct list *list);
 void isis_adj_build_up_list(struct list *adjdb, struct list *list);
 int isis_adj_usage2levels(enum isis_adj_usage usage);
+int isis_bfd_startup_timer(struct thread *thread);
 
 #endif /* ISIS_ADJACENCY_H */

@@ -27,6 +27,7 @@
 #include "log.h"
 #include "lde.h"
 #include "ldp_debug.h"
+#include "rlfa.h"
 
 #include <lib/log.h>
 #include "memory.h"
@@ -73,6 +74,7 @@ struct ldpd_conf	*ldeconf;
 struct nbr_tree		 lde_nbrs = RB_INITIALIZER(&lde_nbrs);
 
 static struct imsgev	*iev_ldpe;
+static struct imsgev    iev_main_sync_data;
 static struct imsgev	*iev_main, *iev_main_sync;
 
 /* lde privileges */
@@ -148,8 +150,8 @@ lde(void)
 		        &iev_main->ev_read);
 	iev_main->handler_write = ldp_write_handler;
 
-	if ((iev_main_sync = calloc(1, sizeof(struct imsgev))) == NULL)
-		fatal(NULL);
+	memset(&iev_main_sync_data, 0, sizeof(iev_main_sync_data));
+	iev_main_sync = &iev_main_sync_data;
 	imsg_init(&iev_main_sync->ibuf, LDPD_FD_SYNC);
 
 	/* create base configuration */
@@ -203,9 +205,10 @@ lde_shutdown(void)
 	if (iev_ldpe)
 		free(iev_ldpe);
 	free(iev_main);
-	free(iev_main_sync);
 
 	log_info("label decision engine exiting");
+
+	zlog_fini();
 	exit(0);
 }
 
@@ -294,7 +297,7 @@ lde_dispatch_imsg(struct thread *thread)
 
 			switch (imsg.hdr.type) {
 			case IMSG_LABEL_MAPPING:
-				lde_check_mapping(map, ln);
+				lde_check_mapping(map, ln, 1);
 				break;
 			case IMSG_LABEL_REQUEST:
 				lde_check_request(map, ln);
@@ -323,8 +326,7 @@ lde_dispatch_imsg(struct thread *thread)
 				break;
 			}
 			if (lde_address_add(ln, lde_addr) < 0) {
-				log_debug("%s: cannot add address %s, it "
-				    "already exists", __func__,
+				log_debug("%s: cannot add address %s, it already exists", __func__,
 				    log_addr(lde_addr->af, &lde_addr->addr));
 			}
 			break;
@@ -341,8 +343,7 @@ lde_dispatch_imsg(struct thread *thread)
 				break;
 			}
 			if (lde_address_del(ln, lde_addr) < 0) {
-				log_debug("%s: cannot delete address %s, it "
-				    "does not exist", __func__,
+				log_debug("%s: cannot delete address %s, it does not exist", __func__,
 				    log_addr(lde_addr->af, &lde_addr->addr));
 			}
 			break;
@@ -380,8 +381,7 @@ lde_dispatch_imsg(struct thread *thread)
 				fatalx("lde_dispatch_imsg: wrong imsg len");
 
 			if (lde_nbr_find(imsg.hdr.peerid))
-				fatalx("lde_dispatch_imsg: "
-				    "neighbor already exists");
+				fatalx("lde_dispatch_imsg: neighbor already exists");
 			lde_nbr_new(imsg.hdr.peerid, imsg.data);
 			break;
 		case IMSG_NEIGHBOR_DOWN:
@@ -416,8 +416,8 @@ lde_dispatch_imsg(struct thread *thread)
 		imsg_event_add(iev);
 	else {
 		/* this pipe is dead, so remove the event handlers and exit */
-		THREAD_READ_OFF(iev->ev_read);
-		THREAD_WRITE_OFF(iev->ev_write);
+		thread_cancel(&iev->ev_read);
+		thread_cancel(&iev->ev_write);
 		lde_shutdown();
 	}
 
@@ -445,6 +445,10 @@ lde_dispatch_parent(struct thread *thread)
 	int			 shut = 0;
 	struct fec		 fec;
 	struct ldp_access	*laccess;
+	struct ldp_rlfa_node	 *rnode, *rntmp;
+	struct ldp_rlfa_client	 *rclient;
+	struct zapi_rlfa_request *rlfa_req;
+	struct zapi_rlfa_igp	 *rlfa_igp;
 
 	iev->ev_read = NULL;
 
@@ -469,6 +473,10 @@ lde_dispatch_parent(struct thread *thread)
 			iface = if_lookup_name(ldeconf, kif->ifname);
 			if (iface) {
 				if_update_info(iface, kif);
+
+				/* if up see if any labels need to be updated */
+				if (kif->operative)
+					lde_route_update(iface, AF_UNSPEC);
 				break;
 			}
 
@@ -532,13 +540,11 @@ lde_dispatch_parent(struct thread *thread)
 			break;
 		case IMSG_SOCKET_IPC:
 			if (iev_ldpe) {
-				log_warnx("%s: received unexpected imsg fd "
-				    "to ldpe", __func__);
+				log_warnx("%s: received unexpected imsg fd to ldpe", __func__);
 				break;
 			}
 			if ((fd = imsg.fd) == -1) {
-				log_warnx("%s: expected to receive imsg fd to "
-				    "ldpe but didn't receive any", __func__);
+				log_warnx("%s: expected to receive imsg fd to ldpe but didn't receive any", __func__);
 				break;
 			}
 
@@ -649,6 +655,42 @@ lde_dispatch_parent(struct thread *thread)
 			lde_check_filter_af(AF_INET6, &ldeconf->ipv6,
 				laccess->name);
 			break;
+		case IMSG_RLFA_REG:
+			if (imsg.hdr.len != IMSG_HEADER_SIZE +
+			    sizeof(struct zapi_rlfa_request)) {
+				log_warnx("%s: wrong imsg len", __func__);
+				break;
+			}
+			rlfa_req = imsg.data;
+			rnode = rlfa_node_find(&rlfa_req->destination,
+					       rlfa_req->pq_address);
+			if (!rnode)
+				rnode = rlfa_node_new(&rlfa_req->destination,
+						      rlfa_req->pq_address);
+			rclient = rlfa_client_find(rnode, &rlfa_req->igp);
+			if (rclient)
+				/* RLFA already registered - do nothing */
+				break;
+			rclient = rlfa_client_new(rnode, &rlfa_req->igp);
+			lde_rlfa_check(rclient);
+			break;
+		case IMSG_RLFA_UNREG_ALL:
+			if (imsg.hdr.len != IMSG_HEADER_SIZE +
+			    sizeof(struct zapi_rlfa_igp)) {
+				log_warnx("%s: wrong imsg len", __func__);
+				break;
+			}
+			rlfa_igp = imsg.data;
+
+			RB_FOREACH_SAFE (rnode, ldp_rlfa_node_head,
+					 &rlfa_node_tree, rntmp) {
+				rclient = rlfa_client_find(rnode, rlfa_igp);
+				if (!rclient)
+					continue;
+
+				rlfa_client_del(rclient);
+			}
+			break;
 		default:
 			log_debug("%s: unexpected imsg %d", __func__,
 			    imsg.hdr.type);
@@ -660,8 +702,8 @@ lde_dispatch_parent(struct thread *thread)
 		imsg_event_add(iev);
 	else {
 		/* this pipe is dead, so remove the event handlers and exit */
-		THREAD_READ_OFF(iev->ev_read);
-		THREAD_WRITE_OFF(iev->ev_write);
+		thread_cancel(&iev->ev_read);
+		thread_cancel(&iev->ev_write);
 		lde_shutdown();
 	}
 
@@ -789,7 +831,6 @@ lde_send_change_klabel(struct fec_node *fn, struct fec_nh *fnh)
 		kr.remote_label = fnh->remote_label;
 		kr.route_type = fnh->route_type;
 		kr.route_instance = fnh->route_instance;
-
 		lde_imsg_compose_parent(IMSG_KLABEL_CHANGE, 0, &kr,
 		    sizeof(kr));
 		break;
@@ -871,6 +912,48 @@ lde_send_delete_klabel(struct fec_node *fn, struct fec_nh *fnh)
 		zpw.local_label = fn->local_label;
 		zpw.remote_label = fnh->remote_label;
 		lde_imsg_compose_parent(IMSG_KPW_UNSET, 0, &zpw, sizeof(zpw));
+		break;
+	}
+}
+
+void
+lde_fec2prefix(const struct fec *fec, struct prefix *prefix)
+{
+	memset(prefix, 0, sizeof(*prefix));
+	switch (fec->type) {
+	case FEC_TYPE_IPV4:
+		prefix->family = AF_INET;
+		prefix->u.prefix4 = fec->u.ipv4.prefix;
+		prefix->prefixlen = fec->u.ipv4.prefixlen;
+		break;
+	case FEC_TYPE_IPV6:
+		prefix->family = AF_INET6;
+		prefix->u.prefix6 = fec->u.ipv6.prefix;
+		prefix->prefixlen = fec->u.ipv6.prefixlen;
+		break;
+	default:
+		prefix->family = AF_UNSPEC;
+		break;
+	}
+}
+
+void
+lde_prefix2fec(const struct prefix *prefix, struct fec *fec)
+{
+	memset(fec, 0, sizeof(*fec));
+	switch (prefix->family) {
+	case AF_INET:
+		fec->type = FEC_TYPE_IPV4;
+		fec->u.ipv4.prefix = prefix->u.prefix4;
+		fec->u.ipv4.prefixlen = prefix->prefixlen;
+		break;
+	case AF_INET6:
+		fec->type = FEC_TYPE_IPV6;
+		fec->u.ipv6.prefix = prefix->u.prefix6;
+		fec->u.ipv6.prefixlen = prefix->prefixlen;
+		break;
+	default:
+		fatalx("lde_prefix2fec: unknown af");
 		break;
 	}
 }
@@ -973,8 +1056,7 @@ lde_send_labelmapping(struct lde_nbr *ln, struct fec_node *fn, int single)
 	lw = (struct lde_wdraw *)fec_find(&ln->sent_wdraw, &fn->fec);
 	if (lw) {
 		if (!fec_find(&ln->sent_map_pending, &fn->fec)) {
-			debug_evt("%s: FEC %s: scheduling to send label "
-			    "mapping later (waiting for pending label release)",
+			debug_evt("%s: FEC %s: scheduling to send label mapping later (waiting for pending label release)",
 			    __func__, log_fec(&fn->fec));
 			lde_map_pending_add(ln, fn);
 		}
@@ -1388,6 +1470,9 @@ lde_nbr_del(struct lde_nbr *ln)
 	/* uninstall received mappings */
 	RB_FOREACH(f, fec_tree, &ft) {
 		fn = (struct fec_node *)f;
+
+		/* Update RLFA clients. */
+		lde_rlfa_update_clients(f, ln, MPLS_INVALID_LABEL);
 
 		LIST_FOREACH(fnh, &fn->nexthops, entry) {
 			switch (f->type) {
@@ -2093,7 +2178,7 @@ static void zclient_sync_init(void)
 	sock_set_nonblock(zclient_sync->sock);
 
 	/* Send hello to notify zebra this is a synchronous client */
-	if (zclient_send_hello(zclient_sync) < 0) {
+	if (zclient_send_hello(zclient_sync) == ZCLIENT_SEND_FAILURE) {
 		log_warnx("Error sending hello for synchronous zclient!");
 		goto retry;
 	}
@@ -2274,4 +2359,157 @@ lde_check_filter_af(int af, struct ldpd_af_conf *af_conf,
 		lde_change_accept_filter(af);
 	if (strcmp(af_conf->acl_label_expnull_for, filter_name) == 0)
 		lde_change_expnull_for_filter(af);
+}
+
+void lde_route_update(struct iface *iface, int af)
+{
+	struct fec	*f;
+	struct fec_node	*fn;
+	struct fec_nh	*fnh;
+	struct lde_nbr  *ln;
+
+	/* update label of non-connected routes */
+	log_debug("update labels for interface %s", iface->name);
+	RB_FOREACH(f, fec_tree, &ft) {
+		fn = (struct fec_node *)f;
+		if (IS_MPLS_UNRESERVED_LABEL(fn->local_label))
+			continue;
+
+		switch (af) {
+		case AF_INET:
+			if (fn->fec.type != FEC_TYPE_IPV4)
+				continue;
+			break;
+		case AF_INET6:
+			if (fn->fec.type != FEC_TYPE_IPV6)
+				continue;
+			break;
+		default:
+			/* unspecified so process both address families */
+			break;
+		}
+
+		LIST_FOREACH(fnh, &fn->nexthops, entry) {
+			/*
+			 * If connected leave existing label. If LDP
+			 * configured on interface or a static route
+			 * may need new label. If no LDP configured
+			 * treat fec as a connected route
+			 */
+			if (fnh->flags & F_FEC_NH_CONNECTED)
+				break;
+
+			if (fnh->ifindex != iface->ifindex)
+				continue;
+
+			fnh->flags &= ~F_FEC_NH_NO_LDP;
+			if (IS_MPLS_RESERVED_LABEL(fn->local_label)) {
+				fn->local_label = NO_LABEL;
+				fn->local_label = lde_update_label(fn);
+				if (fn->local_label != NO_LABEL)
+					RB_FOREACH(ln, nbr_tree, &lde_nbrs)
+						lde_send_labelmapping(
+						    ln, fn, 0);
+			}
+			break;
+		}
+	}
+	RB_FOREACH(ln, nbr_tree, &lde_nbrs)
+		lde_imsg_compose_ldpe(IMSG_MAPPING_ADD_END, ln->peerid,
+		    0, NULL, 0);
+}
+
+void lde_route_update_release(struct iface *iface, int af)
+{
+	struct lde_nbr	*ln;
+	struct fec	*f;
+	struct fec_node	*fn;
+	struct fec_nh	*fnh;
+
+	/* update label of interfaces no longer running LDP */
+	log_debug("release all labels for interface %s af %s", iface->name,
+	    af == AF_INET ? "ipv4" : "ipv6");
+	RB_FOREACH(f, fec_tree, &ft) {
+		fn = (struct fec_node *)f;
+
+		switch (af) {
+		case AF_INET:
+			if (fn->fec.type != FEC_TYPE_IPV4)
+				continue;
+			break;
+		case AF_INET6:
+			if (fn->fec.type != FEC_TYPE_IPV6)
+				continue;
+			break;
+		default:
+			fatalx("lde_route_update_release: unknown af");
+		}
+
+		if (fn->local_label == NO_LABEL)
+			continue;
+
+		LIST_FOREACH(fnh, &fn->nexthops, entry) {
+			/*
+			 * If connected leave existing label. If LDP
+			 * removed from interface may need new label
+			 * and would be treated as a connected route
+			 */
+			if (fnh->flags & F_FEC_NH_CONNECTED)
+				break;
+
+			if (fnh->ifindex != iface->ifindex)
+				continue;
+
+			fnh->flags |= F_FEC_NH_NO_LDP;
+			RB_FOREACH(ln, nbr_tree, &lde_nbrs)
+				lde_send_labelwithdraw(ln, fn, NULL, NULL);
+			lde_free_label(fn->local_label);
+			fn->local_label = NO_LABEL;
+			fn->local_label = lde_update_label(fn);
+			if (fn->local_label != NO_LABEL)
+				RB_FOREACH(ln, nbr_tree, &lde_nbrs)
+					lde_send_labelmapping(ln, fn, 0);
+			break;
+		}
+	}
+	RB_FOREACH(ln, nbr_tree, &lde_nbrs)
+		lde_imsg_compose_ldpe(IMSG_MAPPING_ADD_END, ln->peerid,
+		    0, NULL, 0);
+}
+
+void lde_route_update_release_all(int af)
+{
+	struct lde_nbr	*ln;
+	struct fec	*f;
+	struct fec_node	*fn;
+	struct fec_nh	*fnh;
+
+	/* remove labels from all interfaces as LDP is no longer running for
+	 * this address family
+	 */
+	log_debug("release all labels for address family %s",
+	    af == AF_INET ? "ipv4" : "ipv6");
+	RB_FOREACH(f, fec_tree, &ft) {
+		fn = (struct fec_node *)f;
+		switch (af) {
+		case AF_INET:
+			if (fn->fec.type != FEC_TYPE_IPV4)
+				continue;
+			break;
+		case AF_INET6:
+			if (fn->fec.type != FEC_TYPE_IPV6)
+				continue;
+			break;
+		default:
+			fatalx("lde_route_update_release: unknown af");
+		}
+
+		RB_FOREACH(ln, nbr_tree, &lde_nbrs)
+			lde_send_labelwithdraw(ln, fn, NULL, NULL);
+
+		LIST_FOREACH(fnh, &fn->nexthops, entry) {
+			fnh->flags |= F_FEC_NH_NO_LDP;
+			lde_send_delete_klabel(fn, fnh);
+		}
+	}
 }

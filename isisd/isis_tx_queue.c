@@ -93,8 +93,7 @@ static void tx_queue_element_free(void *element)
 {
 	struct isis_tx_queue_entry *e = element;
 
-	if (e->retry)
-		thread_cancel(e->retry);
+	thread_cancel(&(e->retry));
 
 	XFREE(MTYPE_TX_QUEUE_ENTRY, e);
 }
@@ -144,7 +143,7 @@ void _isis_tx_queue_add(struct isis_tx_queue *queue,
 	if (!queue)
 		return;
 
-	if (isis->debugs & DEBUG_TX_QUEUE) {
+	if (IS_DEBUG_TX_QUEUE) {
 		zlog_debug("Add LSP %s to %s queue as %s LSP. (From %s %s:%d)",
 			   rawlspid_print(lsp->hdr.lsp_id),
 			   queue->circuit->interface->name,
@@ -166,8 +165,7 @@ void _isis_tx_queue_add(struct isis_tx_queue *queue,
 
 	e->type = type;
 
-	if (e->retry)
-		thread_cancel(e->retry);
+	thread_cancel(&(e->retry));
 	thread_add_event(master, tx_queue_send_event, e, 0, &e->retry);
 
 	e->is_retry = false;
@@ -183,15 +181,14 @@ void _isis_tx_queue_del(struct isis_tx_queue *queue, struct isis_lsp *lsp,
 	if (!e)
 		return;
 
-	if (isis->debugs & DEBUG_TX_QUEUE) {
+	if (IS_DEBUG_TX_QUEUE) {
 		zlog_debug("Remove LSP %s from %s queue. (From %s %s:%d)",
 			   rawlspid_print(lsp->hdr.lsp_id),
 			   queue->circuit->interface->name,
 			   func, file, line);
 	}
 
-	if (e->retry)
-		thread_cancel(e->retry);
+	thread_cancel(&(e->retry));
 
 	hash_release(queue->hash, e);
 	XFREE(MTYPE_TX_QUEUE_ENTRY, e);

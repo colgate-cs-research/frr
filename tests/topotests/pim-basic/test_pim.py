@@ -31,6 +31,8 @@ import pytest
 import json
 from functools import partial
 
+pytestmark = pytest.mark.pimd
+
 CWD = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(CWD, "../"))
 
@@ -87,7 +89,7 @@ def setup_module(mod):
     tgen.start_topology()
 
     # For all registered routers, load the zebra configuration file
-    for rname, router in tgen.routers().iteritems():
+    for rname, router in tgen.routers().items():
         router.load_config(
             TopoRouter.RD_ZEBRA, os.path.join(CWD, "{}/zebra.conf".format(rname))
         )

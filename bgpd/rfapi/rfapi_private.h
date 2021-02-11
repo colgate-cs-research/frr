@@ -255,7 +255,7 @@ struct rfapi {
 
 #define RFAPI_0_PREFIX(prefix)                                                 \
 	((((prefix)->family == AF_INET)                                        \
-		  ? (prefix)->u.prefix4.s_addr == 0                            \
+		  ? (prefix)->u.prefix4.s_addr == INADDR_ANY                   \
 		  : (((prefix)->family == AF_INET6)                            \
 			     ? (IN6_IS_ADDR_UNSPECIFIED(&(prefix)->u.prefix6)) \
 			     : 0)))
@@ -289,9 +289,6 @@ add_vnc_route(struct rfapi_descriptor *rfd, /* cookie + UN addr for VPN */
 	      uint8_t type, uint8_t sub_type, int flags);
 #define RFAPI_AHR_NO_TUNNEL_SUBTLV	0x00000001
 #define RFAPI_AHR_RFPOPT_IS_VNCTLV	0x00000002      /* hack! */
-#if 0 /* unused? */
-#  define RFAPI_AHR_SET_PFX_TO_NEXTHOP	0x00000004
-#endif
 
 extern void del_vnc_route(struct rfapi_descriptor *rfd, struct peer *peer,
 			  struct bgp *bgp, safi_t safi, const struct prefix *p,

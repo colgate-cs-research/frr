@@ -131,8 +131,8 @@ DEFPY(sharp_nht_data_dump,
       sharp_nht_data_dump_cmd,
       "sharp data nexthop",
       "Sharp routing Protocol\n"
-      "Nexthop information\n"
-      "Data Dump\n")
+      "Data about what is going on\n"
+      "Nexthop information\n")
 {
 	sharp_nh_tracker_dump(vty);
 
@@ -146,16 +146,12 @@ DEFPY (install_routes_data_dump,
        "Data about what is going on\n"
        "Route Install/Removal Information\n")
 {
-	char buf[PREFIX_STRLEN];
 	struct timeval r;
 
 	timersub(&sg.r.t_end, &sg.r.t_start, &r);
-	vty_out(vty, "Prefix: %s Total: %u %u %u Time: %jd.%ld\n",
-		prefix2str(&sg.r.orig_prefix, buf, sizeof(buf)),
-		sg.r.total_routes,
-		sg.r.installed_routes,
-		sg.r.removed_routes,
-		(intmax_t)r.tv_sec, (long)r.tv_usec);
+	vty_out(vty, "Prefix: %pFX Total: %u %u %u Time: %jd.%ld\n",
+		&sg.r.orig_prefix, sg.r.total_routes, sg.r.installed_routes,
+		sg.r.removed_routes, (intmax_t)r.tv_sec, (long)r.tv_usec);
 
 	return CMD_SUCCESS;
 }
@@ -167,7 +163,7 @@ DEFPY (install_routes,
 	  <nexthop <A.B.C.D$nexthop4|X:X::X:X$nexthop6>|\
 	   nexthop-group NHGNAME$nexthop_group>\
 	  [backup$backup <A.B.C.D$backup_nexthop4|X:X::X:X$backup_nexthop6>] \
-	  (1-1000000)$routes [instance (0-255)$instance] [repeat (2-1000)$rpt]",
+	  (1-1000000)$routes [instance (0-255)$instance] [repeat (2-1000)$rpt] [opaque WORD]",
        "Sharp routing Protocol\n"
        "install some routes\n"
        "Routes to install\n"
@@ -187,11 +183,14 @@ DEFPY (install_routes,
        "Instance to use\n"
        "Instance\n"
        "Should we repeat this command\n"
-       "How many times to repeat this command\n")
+       "How many times to repeat this command\n"
+       "What opaque data to send down\n"
+       "The opaque data\n")
 {
 	struct vrf *vrf;
 	struct prefix prefix;
 	uint32_t rts;
+	uint32_t nhgid = 0;
 
 	sg.r.total_routes = routes;
 	sg.r.installed_routes = 0;
@@ -208,7 +207,7 @@ DEFPY (install_routes,
 	memset(&sg.r.backup_nhop, 0, sizeof(sg.r.nhop));
 	memset(&sg.r.backup_nhop_group, 0, sizeof(sg.r.nhop_group));
 
-	if (start4.s_addr != 0) {
+	if (start4.s_addr != INADDR_ANY) {
 		prefix.family = AF_INET;
 		prefix.prefixlen = 32;
 		prefix.u.prefix4 = start4;
@@ -244,6 +243,8 @@ DEFPY (install_routes,
 			return CMD_WARNING;
 		}
 
+		nhgid = sharp_nhgroup_get_id(nexthop_group);
+		sg.r.nhgid = nhgid;
 		sg.r.nhop_group.nexthop = nhgc->nhg.nexthop;
 
 		/* Use group's backup nexthop info if present */
@@ -278,7 +279,8 @@ DEFPY (install_routes,
 	if (backup) {
 		/* Set flag and index in primary nexthop */
 		SET_FLAG(sg.r.nhop.flags, NEXTHOP_FLAG_HAS_BACKUP);
-		sg.r.nhop.backup_idx = 0;
+		sg.r.nhop.backup_num = 1;
+		sg.r.nhop.backup_idx[0] = 0;
 
 		if (backup_nexthop4.s_addr != INADDR_ANY) {
 			sg.r.backup_nhop.gate.ipv4 = backup_nexthop4;
@@ -292,12 +294,17 @@ DEFPY (install_routes,
 		sg.r.backup_nhop_group.nexthop = &sg.r.backup_nhop;
 	}
 
+	if (opaque)
+		strlcpy(sg.r.opaque, opaque, ZAPI_MESSAGE_OPAQUE_LENGTH);
+	else
+		sg.r.opaque[0] = '\0';
+
 	sg.r.inst = instance;
 	sg.r.vrf_id = vrf->vrf_id;
 	rts = routes;
-	sharp_install_routes_helper(&prefix, sg.r.vrf_id, sg.r.inst,
+	sharp_install_routes_helper(&prefix, sg.r.vrf_id, sg.r.inst, nhgid,
 				    &sg.r.nhop_group, &sg.r.backup_nhop_group,
-				    rts);
+				    rts, sg.r.opaque);
 
 	return CMD_SUCCESS;
 }
@@ -355,7 +362,7 @@ DEFPY (remove_routes,
 
 	memset(&prefix, 0, sizeof(prefix));
 
-	if (start4.s_addr != 0) {
+	if (start4.s_addr != INADDR_ANY) {
 		prefix.family = AF_INET;
 		prefix.prefixlen = 32;
 		prefix.u.prefix4 = start4;
@@ -393,27 +400,31 @@ DEFUN_NOSH (show_debugging_sharpd,
 	return CMD_SUCCESS;
 }
 
-DEFPY(sharp_lsp_prefix_v4, sharp_lsp_prefix_v4_cmd,
-      "sharp lsp (0-100000)$inlabel\
+DEFPY (sharp_lsp_prefix_v4, sharp_lsp_prefix_v4_cmd,
+       "sharp lsp [update]$update (0-100000)$inlabel\
         nexthop-group NHGNAME$nhgname\
         [prefix A.B.C.D/M$pfx\
        " FRR_IP_REDIST_STR_ZEBRA "$type_str [instance (0-255)$instance]]",
-      "Sharp Routing Protocol\n"
-      "Add an LSP\n"
-      "The ingress label to use\n"
-      "Use nexthops from a nexthop-group\n"
-      "The nexthop-group name\n"
-      "Label a prefix\n"
-      "The v4 prefix to label\n"
-      FRR_IP_REDIST_HELP_STR_ZEBRA
-      "Instance to use\n"
-      "Instance\n")
+       "Sharp Routing Protocol\n"
+       "Add an LSP\n"
+       "Update an LSP\n"
+       "The ingress label to use\n"
+       "Use nexthops from a nexthop-group\n"
+       "The nexthop-group name\n"
+       "Label a prefix\n"
+       "The v4 prefix to label\n"
+       FRR_IP_REDIST_HELP_STR_ZEBRA
+       "Instance to use\n"
+       "Instance\n")
 {
 	struct nexthop_group_cmd *nhgc = NULL;
 	struct nexthop_group_cmd *backup_nhgc = NULL;
 	struct nexthop_group *backup_nhg = NULL;
 	struct prefix p = {};
 	int type = 0;
+	bool update_p;
+
+	update_p = (update != NULL);
 
 	/* We're offered a v4 prefix */
 	if (pfx->family > 0 && type_str) {
@@ -457,7 +468,8 @@ DEFPY(sharp_lsp_prefix_v4, sharp_lsp_prefix_v4_cmd,
 		backup_nhg = &(backup_nhgc->nhg);
 	}
 
-	if (sharp_install_lsps_helper(true, pfx->family > 0 ? &p : NULL,
+	if (sharp_install_lsps_helper(true /*install*/, update_p,
+				      pfx->family > 0 ? &p : NULL,
 				      type, instance, inlabel,
 				      &(nhgc->nhg), backup_nhg) == 0)
 		return CMD_SUCCESS;
@@ -522,7 +534,8 @@ DEFPY(sharp_remove_lsp_prefix_v4, sharp_remove_lsp_prefix_v4_cmd,
 		nhg = &(nhgc->nhg);
 	}
 
-	if (sharp_install_lsps_helper(false, pfx->family > 0 ? &p : NULL,
+	if (sharp_install_lsps_helper(false /*!install*/, false,
+				      pfx->family > 0 ? &p : NULL,
 				      type, instance, inlabel, nhg, NULL) == 0)
 		return CMD_SUCCESS;
 	else {
@@ -544,6 +557,34 @@ DEFPY (logpump,
        "Number of log messages per each burst\n")
 {
 	sharp_logpump_run(vty, duration, frequency, burst);
+	return CMD_SUCCESS;
+}
+
+DEFPY (create_session,
+       create_session_cmd,
+       "sharp create session (1-1024)",
+       "Sharp Routing Protocol\n"
+       "Create data\n"
+       "Create a test session\n"
+       "Session ID\n")
+{
+	if (sharp_zclient_create(session) != 0) {
+		vty_out(vty, "%% Client session error\n");
+		return CMD_WARNING;
+	}
+
+	return CMD_SUCCESS;
+}
+
+DEFPY (remove_session,
+       remove_session_cmd,
+       "sharp remove session (1-1024)",
+       "Sharp Routing Protocol\n"
+       "Remove data\n"
+       "Remove a test session\n"
+       "Session ID\n")
+{
+	sharp_zclient_delete(session);
 	return CMD_SUCCESS;
 }
 
@@ -614,6 +655,51 @@ DEFPY (send_opaque_reg,
 	return CMD_SUCCESS;
 }
 
+DEFPY (neigh_discover,
+       neigh_discover_cmd,
+       "sharp neigh discover [vrf NAME$vrf_name] <A.B.C.D$dst4|X:X::X:X$dst6> IFNAME$ifname",
+       SHARP_STR
+       "Discover neighbours\n"
+       "Send an ARP/NDP request\n"
+       VRF_CMD_HELP_STR
+       "v4 Destination address\n"
+       "v6 Destination address\n"
+       "Interface name\n")
+{
+	struct vrf *vrf;
+	struct interface *ifp;
+	struct prefix prefix;
+
+	memset(&prefix, 0, sizeof(prefix));
+
+	if (dst4.s_addr != INADDR_ANY) {
+		prefix.family = AF_INET;
+		prefix.prefixlen = 32;
+		prefix.u.prefix4 = dst4;
+	} else {
+		prefix.family = AF_INET6;
+		prefix.prefixlen = 128;
+		prefix.u.prefix6 = dst6;
+	}
+
+	vrf = vrf_lookup_by_name(vrf_name ? vrf_name : VRF_DEFAULT_NAME);
+	if (!vrf) {
+		vty_out(vty, "The vrf NAME specified: %s does not exist\n",
+			vrf_name ? vrf_name : VRF_DEFAULT_NAME);
+		return CMD_WARNING;
+	}
+
+	ifp = if_lookup_by_name_vrf(ifname, vrf);
+	if (ifp == NULL) {
+		vty_out(vty, "%% Can't find interface %s\n", ifname);
+		return CMD_WARNING;
+	}
+
+	sharp_zebra_send_arp(ifp, &prefix);
+
+	return CMD_SUCCESS;
+}
+
 void sharp_vty_init(void)
 {
 	install_element(ENABLE_NODE, &install_routes_data_dump_cmd);
@@ -626,11 +712,14 @@ void sharp_vty_init(void)
 	install_element(ENABLE_NODE, &sharp_lsp_prefix_v4_cmd);
 	install_element(ENABLE_NODE, &sharp_remove_lsp_prefix_v4_cmd);
 	install_element(ENABLE_NODE, &logpump_cmd);
+	install_element(ENABLE_NODE, &create_session_cmd);
+	install_element(ENABLE_NODE, &remove_session_cmd);
 	install_element(ENABLE_NODE, &send_opaque_cmd);
 	install_element(ENABLE_NODE, &send_opaque_unicast_cmd);
 	install_element(ENABLE_NODE, &send_opaque_reg_cmd);
+	install_element(ENABLE_NODE, &neigh_discover_cmd);
 
-	install_element(VIEW_NODE, &show_debugging_sharpd_cmd);
+	install_element(ENABLE_NODE, &show_debugging_sharpd_cmd);
 
 	return;
 }

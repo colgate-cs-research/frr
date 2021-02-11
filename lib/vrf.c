@@ -39,8 +39,7 @@
 #include "northbound.h"
 #include "northbound_cli.h"
 
-/* default VRF ID value used when VRF backend is not NETNS */
-#define VRF_DEFAULT_INTERNAL 0
+/* default VRF name value used when VRF backend is not NETNS */
 #define VRF_DEFAULT_NAME_INTERNAL "default"
 
 DEFINE_MTYPE_STATIC(LIB, VRF, "VRF")
@@ -159,10 +158,6 @@ struct vrf *vrf_get(vrf_id_t vrf_id, const char *name)
 	struct vrf *vrf = NULL;
 	int new = 0;
 
-	if (debug_vrf)
-		zlog_debug("VRF_GET: %s(%u)", name == NULL ? "(NULL)" : name,
-			   vrf_id);
-
 	/* Nothing to see, move along here */
 	if (!name && vrf_id == VRF_UNKNOWN)
 		return NULL;
@@ -219,13 +214,61 @@ struct vrf *vrf_get(vrf_id_t vrf_id, const char *name)
 	return vrf;
 }
 
+/* Update a VRF. If not found, create one.
+ * Arg:
+ *   name   - The name of the vrf.
+ *   vrf_id - The vrf_id of the vrf.
+ * Description: This function first finds the vrf using its name. If the vrf is
+ * found and the vrf-id of the existing vrf does not match the new vrf id, it
+ * will disable the existing vrf and update it with new vrf-id. If the vrf is
+ * not found, it will create the vrf with given name and the new vrf id.
+ */
+struct vrf *vrf_update(vrf_id_t new_vrf_id, const char *name)
+{
+	struct vrf *vrf = NULL;
+
+	/*Treat VRF add for existing vrf as update
+	 * Update VRF ID and also update in VRF ID table
+	 */
+	if (name)
+		vrf = vrf_lookup_by_name(name);
+	if (vrf && new_vrf_id != VRF_UNKNOWN && vrf->vrf_id != VRF_UNKNOWN
+	    && vrf->vrf_id != new_vrf_id) {
+		if (debug_vrf) {
+			zlog_debug(
+				"Vrf Update event: %s old id: %u, new id: %u",
+				name, vrf->vrf_id, new_vrf_id);
+		}
+
+		/*Disable the vrf to simulate implicit delete
+		 * so that all stale routes are deleted
+		 * This vrf will be enabled down the line
+		 */
+		vrf_disable(vrf);
+
+
+		RB_REMOVE(vrf_id_head, &vrfs_by_id, vrf);
+		vrf->vrf_id = new_vrf_id;
+		RB_INSERT(vrf_id_head, &vrfs_by_id, vrf);
+
+	} else {
+
+		/*
+		 * vrf_get is implied creation if it does not exist
+		 */
+		vrf = vrf_get(new_vrf_id, name);
+	}
+	return vrf;
+}
+
 /* Delete a VRF. This is called when the underlying VRF goes away, a
  * pre-configured VRF is deleted or when shutting down (vrf_terminate()).
  */
 void vrf_delete(struct vrf *vrf)
 {
 	if (debug_vrf)
-		zlog_debug("VRF %u is to be deleted.", vrf->vrf_id);
+		zlog_debug("VRF %s(%u) is to be deleted.", vrf->name,
+			   vrf->vrf_id);
 
 	if (vrf_is_enabled(vrf))
 		vrf_disable(vrf);
@@ -282,7 +325,7 @@ int vrf_enable(struct vrf *vrf)
 		return 1;
 
 	if (debug_vrf)
-		zlog_debug("VRF %u is enabled.", vrf->vrf_id);
+		zlog_debug("VRF %s(%u) is enabled.", vrf->name, vrf->vrf_id);
 
 	SET_FLAG(vrf->status, VRF_ACTIVE);
 
@@ -312,10 +355,19 @@ void vrf_disable(struct vrf *vrf)
 	UNSET_FLAG(vrf->status, VRF_ACTIVE);
 
 	if (debug_vrf)
-		zlog_debug("VRF %u is to be disabled.", vrf->vrf_id);
+		zlog_debug("VRF %s(%u) is to be disabled.", vrf->name,
+			   vrf->vrf_id);
 
 	/* Till now, nothing to be done for the default VRF. */
 	// Pending: see why this statement.
+
+
+	/*
+	 * When the vrf is disabled let's
+	 * handle all nexthop-groups associated
+	 * with this vrf
+	 */
+	nexthop_group_disable_vrf(vrf);
 
 	if (vrf_master.vrf_disable_hook)
 		(*vrf_master.vrf_disable_hook)(vrf);
@@ -324,6 +376,9 @@ void vrf_disable(struct vrf *vrf)
 const char *vrf_id_to_name(vrf_id_t vrf_id)
 {
 	struct vrf *vrf;
+
+	if (vrf_id == VRF_DEFAULT)
+		return VRF_DEFAULT_NAME;
 
 	vrf = vrf_lookup_by_id(vrf_id);
 	return VRF_LOGNAME(vrf);
@@ -512,7 +567,7 @@ void vrf_init(int (*create)(struct vrf *), int (*enable)(struct vrf *),
 
 		strlcpy(default_vrf->data.l.netns_name,
 			VRF_DEFAULT_NAME, NS_NAMSIZ);
-		ns = ns_lookup(ns_get_default_id());
+		ns = ns_lookup(NS_DEFAULT);
 		ns->vrf_ctxt = default_vrf;
 		default_vrf->ns_ctxt = ns;
 	}
@@ -638,6 +693,7 @@ int vrf_handler_create(struct vty *vty, const char *vrfname,
 		ret = nb_cli_apply_changes(vty, xpath_list);
 		if (ret == CMD_SUCCESS) {
 			VTY_PUSH_XPATH(VRF_NODE, xpath_list);
+			nb_cli_pending_commit_check(vty);
 			vrfp = vrf_lookup_by_name(vrfname);
 			if (vrfp)
 				VTY_PUSH_CONTEXT(VRF_NODE, vrfp);
@@ -691,8 +747,7 @@ int vrf_netns_handler_create(struct vty *vty, struct vrf *vrf, char *pathname,
 			return CMD_SUCCESS;
 		if (vty)
 			vty_out(vty,
-				"NS %s is already configured"
-				" with VRF %u(%s)\n",
+				"NS %s is already configured with VRF %u(%s)\n",
 				ns->name, vrf2->vrf_id, vrf2->name);
 		else
 			zlog_info("NS %s is already configured with VRF %u(%s)",
@@ -732,7 +787,7 @@ DEFUN_NOSH(vrf_exit,
 	return CMD_SUCCESS;
 }
 
-DEFUN_NOSH (vrf,
+DEFUN_YANG_NOSH (vrf,
        vrf_cmd,
        "vrf NAME",
        "Select a VRF to configure\n"
@@ -744,7 +799,7 @@ DEFUN_NOSH (vrf,
 	return vrf_handler_create(vty, vrfname, NULL);
 }
 
-DEFUN (no_vrf,
+DEFUN_YANG (no_vrf,
        no_vrf_cmd,
        "no vrf NAME",
        NO_STR
@@ -758,10 +813,8 @@ DEFUN (no_vrf,
 
 	vrfp = vrf_lookup_by_name(vrfname);
 
-	if (vrfp == NULL) {
-		vty_out(vty, "%% VRF %s does not exist\n", vrfname);
-		return CMD_WARNING_CONFIG_FAILED;
-	}
+	if (vrfp == NULL)
+		return CMD_SUCCESS;
 
 	if (CHECK_FLAG(vrfp->status, VRF_ACTIVE)) {
 		vty_out(vty, "%% Only inactive VRFs can be deleted\n");
@@ -942,17 +995,6 @@ const char *vrf_get_default_name(void)
 	return vrf_default_name;
 }
 
-vrf_id_t vrf_get_default_id(void)
-{
-	/* backend netns is only known by zebra
-	 * for other daemons, we return VRF_DEFAULT_INTERNAL
-	 */
-	if (vrf_is_backend_netns())
-		return ns_get_default_id();
-	else
-		return VRF_DEFAULT_INTERNAL;
-}
-
 int vrf_bind(vrf_id_t vrf_id, int fd, const char *name)
 {
 	int ret = 0;
@@ -1069,6 +1111,7 @@ static int lib_vrf_create(struct nb_cb_create_args *args)
 
 	vrfp = vrf_get(VRF_UNKNOWN, vrfname);
 
+	vrf_set_user_cfged(vrfp);
 	nb_running_set_entry(args->dnode, vrfp);
 
 	return NB_OK;
@@ -1094,7 +1137,7 @@ static int lib_vrf_destroy(struct nb_cb_destroy_args *args)
 		vrfp = nb_running_unset_entry(args->dnode);
 
 		/* Clear configured flag and invoke delete. */
-		UNSET_FLAG(vrfp->status, VRF_CONFIGURED);
+		vrf_reset_user_cfged(vrfp);
 		vrf_delete(vrfp);
 		break;
 	}

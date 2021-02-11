@@ -81,6 +81,7 @@ struct frr_daemon_info {
 #endif
 	const char *vty_path;
 	const char *module_path;
+	const char *script_path;
 
 	const char *pathspace;
 	bool zpathspace;
@@ -102,6 +103,9 @@ struct frr_daemon_info {
 	size_t n_yang_modules;
 
 	bool log_always;
+
+	/* Optional upper limit on the number of fds used in select/poll */
+	uint32_t limit_fds;
 };
 
 /* execname is the daemon's executable (and pidfile and configfile) name,
@@ -134,8 +138,10 @@ extern __attribute__((__noreturn__)) void frr_help_exit(int status);
 extern struct thread_master *frr_init(void);
 extern const char *frr_get_progname(void);
 extern enum frr_cli_mode frr_get_cli_mode(void);
+uint32_t frr_get_fd_limit(void);
 
 DECLARE_HOOK(frr_late_init, (struct thread_master * tm), (tm))
+DECLARE_HOOK(frr_very_late_init, (struct thread_master * tm), (tm))
 extern void frr_config_fork(void);
 
 extern void frr_run(struct thread_master *master);
@@ -157,6 +163,7 @@ extern char frr_zclientpath[256];
 extern const char frr_sysconfdir[];
 extern char frr_vtydir[256];
 extern const char frr_moduledir[];
+extern const char frr_scriptdir[];
 
 extern char frr_protoname[];
 extern char frr_protonameinst[];
